@@ -5,10 +5,11 @@ request into Ollama's /api/chat format and translates the reply back, so the
 agent loop works unchanged with either provider.
 """
 
+import http.client
 import json
 import uuid
 
-from api_client import APIError, post_json
+from api_client import APIConnectionError, APIError, open_stream
 
 API_URL = "https://ollama.com/api/chat"
 
@@ -129,23 +130,59 @@ class OllamaClient:
     """Minimal client for Ollama Cloud, accepting and returning Messages API shapes."""
 
     def __init__(self, api_key: str, think: str | None = None):
-        # None leaves thinking to the model's default; "on" sends true; "low",
-        # "medium" or "high" set a level (gpt-oss models only accept levels).
+        # None leaves thinking to the model's default; "on" and "off" send true
+        # and false; "low", "medium" or "high" set a level (gpt-oss models only
+        # accept levels).
         self.think = think
         self.headers = {
             "Authorization": f"Bearer {api_key}",
             "content-type": "application/json",
         }
 
-    def create_message(self, body: dict) -> dict:
-        # Claude-only fields (cache_control, output_config, fallbacks) are dropped.
+    def create_message(self, body: dict, printer) -> dict:
+        """Stream a response, showing thinking and text through printer as they arrive,
+        and return the complete message in the shape of a Messages API response."""
+        # Claude-only fields (cache_control, output_config, thinking, fallbacks) are dropped.
         request = {
             "model": body["model"],
             "messages": to_ollama_messages(body.get("system", []), body["messages"]),
             "tools": to_ollama_tools(body.get("tools", [])),
-            "stream": False,
+            "stream": True,
             "options": {"num_predict": body["max_tokens"]},
         }
         if self.think:
-            request["think"] = True if self.think == "on" else self.think
-        return from_ollama_response(post_json(API_URL, self.headers, request))
+            request["think"] = {"on": True, "off": False}.get(self.think, self.think)
+
+        # Each line of the stream is a JSON object holding the next piece of the
+        # message; the last one has done: true and the token counts.
+        thinking, text, tool_calls = [], [], []
+        final = None
+        with open_stream(API_URL, self.headers, request) as response:
+            try:
+                for line in response:
+                    if not line.strip():
+                        continue
+                    chunk = json.loads(line)
+                    if chunk.get("error"):
+                        raise APIError(500, str(chunk["error"]))
+                    message = chunk.get("message") or {}
+                    if message.get("thinking"):
+                        thinking.append(message["thinking"])
+                        printer.thinking(message["thinking"])
+                    if message.get("content"):
+                        text.append(message["content"])
+                        printer.text(message["content"])
+                    tool_calls.extend(message.get("tool_calls") or [])
+                    if chunk.get("done"):
+                        final = chunk
+                        break
+            except ValueError:
+                raise APIError(200, "the API sent a streamed line that is not valid JSON") from None
+            except (OSError, http.client.HTTPException) as e:
+                raise APIConnectionError(f"the connection dropped mid-response: {e}") from None
+            finally:
+                printer.end_block()
+        if final is None:
+            raise APIConnectionError("the response ended before it was complete")
+        final["message"] = {"thinking": "".join(thinking), "content": "".join(text), "tool_calls": tool_calls}
+        return from_ollama_response(final)

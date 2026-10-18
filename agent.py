@@ -1,5 +1,7 @@
 """The conversation loop: sends messages to the model and runs the tools it calls."""
 
+import sys
+
 import style
 from api_client import Client
 from ollama_client import OllamaClient
@@ -29,28 +31,102 @@ encoding and line endings; if read_file says a file is not UTF-8, only use chara
 encoding can represent. Binary files (for example .xlsx or .dll) cannot be read or written. \
 The user must approve every write; if a write is declined, ask what they would like instead."""
 
+# Prepended to a /talk message. The tool list stays the same (changing it would
+# invalidate the prompt cache), so write_file is also refused at dispatch.
+READ_ONLY_NOTE = (
+    "[Read-only message: answer using list_directory and read_file only. "
+    "Do not write or change any files; write_file is disabled for this message.]\n\n"
+)
+
+
+def cut_off_reason(content: list) -> str:
+    """Explain a response that hit MAX_TOKENS, based on what it had produced so far."""
+    types = {block["type"] for block in content}
+    if "tool_use" in types:
+        return (
+            f"Response hit the {MAX_TOKENS:,}-token output limit in the middle of a tool call, so it was "
+            "not run. Ask for smaller steps, e.g. one file at a time."
+        )
+    if types and types <= {"thinking", "redacted_thinking"}:
+        return (
+            f"Response hit the {MAX_TOKENS:,}-token output limit while still thinking, so there is no "
+            "answer. Ask for smaller steps, or with Ollama try --think low or --think off."
+        )
+    return f"Response hit the {MAX_TOKENS:,}-token output limit and was cut off."
+
+
+class StreamPrinter:
+    """Prints thinking (dimmed) and reply text as they stream in, each under its own label."""
+
+    def __init__(self, label: str, show_thinking: bool):
+        self.label = label
+        self.show_thinking = show_thinking
+        self.current = None  # "thinking", "text", or None between blocks
+
+    def write(self, text: str) -> None:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+
+    def start(self, kind: str, text: str) -> str:
+        """Open a labelled block if one of this kind isn't already open, and return
+        the text to print (without leading whitespace when the block is new)."""
+        if self.current == kind:
+            return text
+        self.end_block()
+        header = style.dim("thinking>") if kind == "thinking" else style.model_label(self.label + ">")
+        self.write(f"\n{header} ")
+        self.current = kind
+        return text.lstrip()
+
+    def thinking(self, text: str) -> None:
+        if self.show_thinking and (text.strip() or self.current == "thinking"):
+            self.write(style.dim(self.start("thinking", text)))
+
+    def text(self, text: str) -> None:
+        if text.strip() or self.current == "text":
+            self.write(self.start("text", text))
+
+    def end_block(self) -> None:
+        if self.current:
+            self.write("\n")
+            self.current = None
+
+    def notice(self, text: str) -> None:
+        self.end_block()
+        print(style.warning(f"  [{text}]"))
+
 
 class Agent:
-    def __init__(self, client: Client | OllamaClient, workspace: Workspace, model: str):
+    def __init__(
+        self, client: Client | OllamaClient, workspace: Workspace, model: str, show_thinking: bool = True
+    ):
         self.client = client
         self.workspace = workspace
         self.model = model
         # Only Claude models have prices; Ollama Cloud is billed by subscription.
         self.priced = model in MODELS
         self.label = "claude" if self.priced else model
+        self.show_thinking = show_thinking
         self.messages = []
         self.session_usage = Usage()
+        self.read_only = False
 
-    def send(self, user_text: str) -> None:
+    def send(self, user_text: str, read_only: bool = False) -> None:
         """Run one user turn, then print its token usage and estimated cost.
+
+        With read_only, the model may list and read files but every write is refused.
 
         The summary is printed even if the turn fails part-way, because the
         API calls that did complete are still billed.
         """
         turn_usage = Usage()
+        self.read_only = read_only
+        if read_only:
+            user_text = READ_ONLY_NOTE + user_text
         try:
             self.run_turn(user_text, turn_usage)
         finally:
+            self.read_only = False
             self.session_usage.add(turn_usage)
             if (turn_usage.total_input or turn_usage.output) and self.priced:
                 print(
@@ -74,6 +150,9 @@ class Agent:
             "output_config": {"effort": "high"},
             "cache_control": CACHE_CONTROL,
         }
+        if self.priced and self.show_thinking:
+            # Claude returns empty thinking text unless a summary is asked for.
+            body["thinking"] = {"type": "adaptive", "display": "summarized"}
         if self.priced and MODELS[self.model].fallbacks:
             body["fallbacks"] = "default"
         return body
@@ -81,26 +160,26 @@ class Agent:
     def run_turn(self, user_text: str, turn_usage: Usage) -> None:
         self.messages.append({"role": "user", "content": user_text})
         while True:
-            response = self.client.create_message(self.request_body())
+            printer = StreamPrinter(self.label, self.show_thinking)
+            response = self.client.create_message(self.request_body(), printer)
             turn_usage.add(response_usage(response, self.model))
             content = response.get("content", [])
             stop_reason = response.get("stop_reason")
             # Append the full content (including thinking blocks) unchanged.
             self.messages.append({"role": "assistant", "content": content})
 
-            for block in content:
-                if block["type"] == "text" and block["text"].strip():
-                    print(f"\n{style.model_label(self.label + '>')} {block['text']}")
-                elif block["type"] == "fallback":
-                    from_model = block.get("from", {}).get("model", "a model")
-                    to_model = block.get("to", {}).get("model", "another model")
-                    print(style.warning(f"  [{from_model} declined; {to_model} continued]"))
-
             if stop_reason == "refusal":
                 print("\n" + style.warning("  [The model declined this request.]"))
                 return
             if stop_reason == "max_tokens":
-                print("\n" + style.warning("  [Response hit the max_tokens limit and was cut off.]"))
+                print("\n" + style.warning(f"  [{cut_off_reason(content)}]"))
+                # A cut-off tool call has incomplete input and no result, which the
+                # next request would be rejected for, so drop it from the history.
+                kept = [block for block in content if block["type"] != "tool_use"]
+                if kept:
+                    self.messages[-1] = {"role": "assistant", "content": kept}
+                else:
+                    self.messages.pop()
                 return
             if stop_reason != "tool_use":
                 return
@@ -112,6 +191,8 @@ class Agent:
                 tool_input = block.get("input") or {}
                 print(f"  {style.dim('->')} {style.tool_name(block['name'])}({tool_input.get('path', '')})")
                 try:
+                    if self.read_only and block["name"] == "write_file":
+                        raise ToolError("writes are disabled: the user sent this message with /talk (read-only)")
                     result = run_tool(self.workspace, block["name"], tool_input)
                     tool_results.append({"type": "tool_result", "tool_use_id": block["id"], "content": result})
                 except (ToolError, OSError) as e:

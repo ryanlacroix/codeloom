@@ -9,20 +9,19 @@ never executes anything.
 Requires Python 3.10+. No packages to install: it uses only the standard library and calls
 the Claude API (or Ollama Cloud's API) directly over HTTPS.
 
-Put your access token in `key.txt`, in the same folder as `harness.py`, and make it
-readable only by you:
-
-```bash
-echo '<your access token>' > key.txt
-chmod 600 key.txt
-```
-
-To use Ollama Cloud instead, create an API key at <https://ollama.com/settings/keys> and put
-it in `ollama_key.txt` the same way:
+Ollama Cloud is the default provider. Create an API key at <https://ollama.com/settings/keys>,
+put it in `ollama_key.txt` in the same folder as `harness.py`, and make it readable only by you:
 
 ```bash
 echo '<your Ollama API key>' > ollama_key.txt
 chmod 600 ollama_key.txt
+```
+
+To use Claude instead, put your Claude access token in `key.txt` the same way:
+
+```bash
+echo '<your access token>' > key.txt
+chmod 600 key.txt
 ```
 
 Both key files are listed in `.gitignore`. The harness warns at startup if other users can read
@@ -32,34 +31,42 @@ contains it.
 ## Usage
 
 ```bash
-python3 harness.py /path/to/project      # asks before every file write
-python3 harness.py /path/to/project --yes  # auto-approve writes
-python3 harness.py /path/to/project --model claude-sonnet-5-5
-python3 harness.py /path/to/project --provider ollama                    # Ollama Cloud, gemma4:31b
-python3 harness.py /path/to/project --provider ollama --model <model>    # any Ollama Cloud model
+python3 harness.py /path/to/project                  # Ollama Cloud, gemma4:31b, thinking on
+python3 harness.py /path/to/project --yes            # auto-approve writes
+python3 harness.py /path/to/project --model <model>  # any Ollama Cloud model
+python3 harness.py /path/to/project --provider claude --model claude-sonnet-5-5
 ```
 
-With Claude (the default provider), `--model` accepts `claude-opus-5-5` (default),
-`claude-sonnet-5-5`, `claude-haiku-5-5` and `claude-fable-5-1`.
-
-With `--provider ollama`, `--model` takes any model name from Ollama Cloud's catalogue
+With Ollama (the default provider), `--model` takes any model name from Ollama Cloud's catalogue
 (<https://ollama.com/search?c=cloud>, or `GET https://ollama.com/api/tags`); the default is
 `gemma4:31b`. Pick a model that supports tool calling. Requests go to `https://ollama.com/api/chat`.
 
-`--think` turns on thinking for Ollama models that support it, which helps with multi-step or
-multi-file changes at the cost of slower turns and more usage. Use `--think on` for most thinking
-models, or `--think low|medium|high` for gpt-oss models, which only accept a level. Without it,
-the model uses its own default. A model that can't think rejects the request, so leave the flag
-off for those. Claude doesn't need it: its reasoning is already on.
+With `--provider claude`, `--model` accepts `claude-opus-5-5` (default), `claude-sonnet-5-5`,
+`claude-haiku-5-5` and `claude-fable-5-1`.
+
+Thinking is on by default for Ollama models, which helps with multi-step or multi-file changes
+at the cost of slower turns and more usage. gpt-oss models only accept a level, so use
+`--think low|medium|high` with them. A model that can't think rejects the request: use
+`--think off` for those. `--think` doesn't apply to Claude, whose reasoning is already on.
 
 ```bash
-python3 harness.py /path/to/project --provider ollama --model <model> --think on
+python3 harness.py /path/to/project --model gpt-oss:120b --think high
+python3 harness.py /path/to/project --model <non-thinking model> --think off
 ```
 
+Replies stream in as they're written. The model's thinking is shown first, dimmed under a
+`thinking>` label, then the reply under the model's name. Pass `--hide-thinking` to show only the
+reply. With Claude, the thinking shown is a summary: the API never returns Claude's full reasoning.
+
 Failed requests are retried twice with backoff on rate limits (429), overloads and server
-errors (5xx), timeouts and dropped connections.
+errors (5xx), timeouts and dropped connections, as long as the reply hasn't started yet. A reply
+that fails part-way isn't retried, because its start has already been shown; send the message again.
 
 At the `you>` prompt, type a request. `/reset` clears the conversation, `/exit` quits.
+
+Start a message with `/talk` to ask a question without anything being changed, for example
+`/talk how does the retry logic work?`. The model can still list and read files, but any write
+it attempts during that message is refused.
 
 Output is colored when it goes to a terminal. Set `NO_COLOR=1` to turn colors off, or
 `FORCE_COLOR=1` to keep them when piping output.

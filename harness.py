@@ -73,8 +73,8 @@ def main() -> None:
     parser.add_argument(
         "--provider",
         choices=sorted(KEY_FILES),
-        default="claude",
-        help="API to connect to (default: claude)",
+        default="ollama",
+        help="API to connect to (default: ollama)",
     )
     parser.add_argument(
         "--model",
@@ -83,9 +83,14 @@ def main() -> None:
     )
     parser.add_argument(
         "--think",
-        choices=["on", "low", "medium", "high"],
-        help="Ollama only: turn on thinking for models that support it. Use a level "
-        "(low/medium/high) for gpt-oss models, 'on' for others (default: the model's own default)",
+        choices=["on", "off", "low", "medium", "high"],
+        help="Ollama only: thinking for models that support it. Use a level (low/medium/high) "
+        "for gpt-oss models, and 'off' for models that cannot think (default: on)",
+    )
+    parser.add_argument(
+        "--hide-thinking",
+        action="store_true",
+        help="don't show the model's thinking as it streams (the reply still streams)",
     )
     parser.add_argument(
         "--fallback-encoding",
@@ -102,6 +107,7 @@ def main() -> None:
             parser.error("--think only applies to --provider ollama (Claude's reasoning is already on)")
     else:
         args.model = args.model or OLLAMA_DEFAULT_MODEL
+        args.think = args.think or "on"
     if not args.dir.strip():
         parser.error("a project directory is required")
     root = Path(args.dir)
@@ -115,13 +121,16 @@ def main() -> None:
     workspace = Workspace(
         root, auto_approve_writes=args.yes, fallback_encoding=args.fallback_encoding, blocked=tuple(path for path, _ in KEY_FILES.values())
     )
-    agent = Agent(make_client(args.provider, args.think), workspace, model=args.model)
+    agent = Agent(
+        make_client(args.provider, args.think), workspace, model=args.model, show_thinking=not args.hide_thinking
+    )
 
     print(f"{style.bold('Workspace:')} {workspace.root}")
     print(f"{style.bold('Model:')}     {style.model_label(args.model)} {style.dim(f'({args.provider})')}")
     if args.think:
         print(f"{style.bold('Thinking:')}  {args.think}")
     print(style.dim("The model can read and write files here only. No commands can be run."))
+    print(style.dim("Start a message with /talk to ask without any files being changed."))
     print(style.dim("Type /reset to clear the conversation, /exit to quit.") + "\n")
 
     while True:
@@ -142,9 +151,17 @@ def main() -> None:
                 print(style.dim("  [conversation cleared]"))
             continue
 
+        read_only = user_text == "/talk" or user_text.startswith(("/talk ", "/talk\t"))
+        if read_only:
+            user_text = user_text[len("/talk") :].strip()
+            if not user_text:
+                print(style.dim("  [usage: /talk <question>; the model can read files but not change them]"))
+                continue
+            print(style.dim("  [read-only: no files will be changed]"))
+
         history_len = len(agent.messages)
         try:
-            agent.send(user_text)
+            agent.send(user_text, read_only=read_only)
         except KeyboardInterrupt:
             print("\n" + style.warning("  [interrupted]"))
             del agent.messages[history_len:]
@@ -156,7 +173,7 @@ def main() -> None:
             else:
                 print(style.error(f"  [API error {e.status}: {e.message}]"))
                 if args.think and "think" in e.message.lower():
-                    print(style.warning("  [this model may not support thinking: try again without --think]"))
+                    print(style.warning("  [this model may not support thinking: try again with --think off]"))
             del agent.messages[history_len:]
         except APIConnectionError as e:
             print(style.error(f"  [could not reach the API: {e}]"))
