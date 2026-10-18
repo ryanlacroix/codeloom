@@ -25,6 +25,7 @@ import stat
 import sys
 from pathlib import Path
 
+import style
 from agent import Agent
 from api_client import APIConnectionError, APIError, Client
 from models import DEFAULT_MODEL, MODELS, OLLAMA_DEFAULT_MODEL
@@ -56,7 +57,7 @@ def read_key(provider: str) -> str:
     if not key:
         sys.exit(f"{key_file} is empty. Put your {what} in it.")
     if key_file.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO):
-        print(f"Warning: {key_file} can be read by other users. Run: chmod 600 {key_file}\n")
+        print(style.warning(f"Warning: {key_file} can be read by other users. Run: chmod 600 {key_file}") + "\n")
     return key
 
 
@@ -116,16 +117,16 @@ def main() -> None:
     )
     agent = Agent(make_client(args.provider, args.think), workspace, model=args.model)
 
-    print(f"Workspace: {workspace.root}")
-    print(f"Model:     {args.model} ({args.provider})")
+    print(f"{style.bold('Workspace:')} {workspace.root}")
+    print(f"{style.bold('Model:')}     {style.model_label(args.model)} {style.dim(f'({args.provider})')}")
     if args.think:
-        print(f"Thinking:  {args.think}")
-    print("The model can read and write files here only. No commands can be run.")
-    print("Type /reset to clear the conversation, /exit to quit.\n")
+        print(f"{style.bold('Thinking:')}  {args.think}")
+    print(style.dim("The model can read and write files here only. No commands can be run."))
+    print(style.dim("Type /reset to clear the conversation, /exit to quit.") + "\n")
 
     while True:
         try:
-            user_text = input("you> ").strip()
+            user_text = input(style.prompt("you> ", style.BOLD, style.GREEN)).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -136,29 +137,29 @@ def main() -> None:
         if user_text == "/reset":
             agent.messages = []
             if agent.priced:
-                print(f"  [conversation cleared; ~${agent.session_usage.cost:.4f} spent this session]")
+                print(style.dim(f"  [conversation cleared; ~${agent.session_usage.cost:.4f} spent this session]"))
             else:
-                print("  [conversation cleared]")
+                print(style.dim("  [conversation cleared]"))
             continue
 
         history_len = len(agent.messages)
         try:
             agent.send(user_text)
         except KeyboardInterrupt:
-            print("\n  [interrupted]")
+            print("\n" + style.warning("  [interrupted]"))
             del agent.messages[history_len:]
         except APIError as e:
             if e.status == 401:
-                print(f"  [authentication failed: check the key in {KEY_FILES[args.provider][0]}]")
+                print(style.error(f"  [authentication failed: check the key in {KEY_FILES[args.provider][0]}]"))
             elif e.status == 429:
-                print("  [rate limited: wait a moment and try again]")
+                print(style.warning("  [rate limited: wait a moment and try again]"))
             else:
-                print(f"  [API error {e.status}: {e.message}]")
+                print(style.error(f"  [API error {e.status}: {e.message}]"))
                 if args.think and "think" in e.message.lower():
-                    print("  [this model may not support thinking: try again without --think]")
+                    print(style.warning("  [this model may not support thinking: try again without --think]"))
             del agent.messages[history_len:]
         except APIConnectionError as e:
-            print(f"  [could not reach the API: {e}]")
+            print(style.error(f"  [could not reach the API: {e}]"))
             del agent.messages[history_len:]
 
 

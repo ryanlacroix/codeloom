@@ -7,6 +7,8 @@ endings, so files are written back in the format they were read in.
 import codecs
 from pathlib import Path
 
+import style
+
 MAX_READ_BYTES = 1_000_000
 MAX_WRITE_BYTES = 1_000_000
 MAX_LIST_ENTRIES = 500
@@ -138,16 +140,16 @@ class Workspace:
 
     def confirm(self, message: str, content: str) -> bool:
         if self.auto_approve_writes:
-            print(f"  [auto-approved] {message}")
+            print(f"  {style.dim('[auto-approved]')} {message}")
             return True
-        print(f"\n  {message}")
+        print(f"\n  {style.paint(message, style.BOLD, style.YELLOW)}")
         preview = content.splitlines()
         for line in preview[:20]:
-            print(f"  | {line}")
+            print(f"  {style.dim('|')} {style.success(line)}")
         if len(preview) > 20:
-            print(f"  | ... ({len(preview) - 20} more lines)")
+            print(style.dim(f"  | ... ({len(preview) - 20} more lines)"))
         try:
-            answer = input("  Allow this write? [y/N] ").strip().lower()
+            answer = input(style.prompt("  Allow this write? [y/N] ", style.BOLD)).strip().lower()
         except EOFError:
             return False
         return answer in ("y", "yes")

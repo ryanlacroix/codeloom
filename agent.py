@@ -1,5 +1,6 @@
 """The conversation loop: sends messages to the model and runs the tools it calls."""
 
+import style
 from api_client import Client
 from ollama_client import OllamaClient
 from models import MODELS, Usage, response_usage
@@ -53,12 +54,15 @@ class Agent:
             self.session_usage.add(turn_usage)
             if (turn_usage.total_input or turn_usage.output) and self.priced:
                 print(
-                    f"\n  [{turn_usage.total_input:,} input tokens ({turn_usage.cache_read:,} from cache), "
-                    f"{turn_usage.output:,} output · ~${turn_usage.cost:.4f} this turn · "
-                    f"~${self.session_usage.cost:.4f} this session]"
+                    "\n"
+                    + style.dim(
+                        f"  [{turn_usage.total_input:,} input tokens ({turn_usage.cache_read:,} from cache), "
+                        f"{turn_usage.output:,} output · ~${turn_usage.cost:.4f} this turn · "
+                        f"~${self.session_usage.cost:.4f} this session]"
+                    )
                 )
             elif turn_usage.total_input or turn_usage.output:
-                print(f"\n  [{turn_usage.total_input:,} input tokens, {turn_usage.output:,} output]")
+                print("\n" + style.dim(f"  [{turn_usage.total_input:,} input tokens, {turn_usage.output:,} output]"))
 
     def request_body(self) -> dict:
         body = {
@@ -86,17 +90,17 @@ class Agent:
 
             for block in content:
                 if block["type"] == "text" and block["text"].strip():
-                    print(f"\n{self.label}> {block['text']}")
+                    print(f"\n{style.model_label(self.label + '>')} {block['text']}")
                 elif block["type"] == "fallback":
                     from_model = block.get("from", {}).get("model", "a model")
                     to_model = block.get("to", {}).get("model", "another model")
-                    print(f"  [{from_model} declined; {to_model} continued]")
+                    print(style.warning(f"  [{from_model} declined; {to_model} continued]"))
 
             if stop_reason == "refusal":
-                print("\n  [The model declined this request.]")
+                print("\n" + style.warning("  [The model declined this request.]"))
                 return
             if stop_reason == "max_tokens":
-                print("\n  [Response hit the max_tokens limit and was cut off.]")
+                print("\n" + style.warning("  [Response hit the max_tokens limit and was cut off.]"))
                 return
             if stop_reason != "tool_use":
                 return
@@ -106,12 +110,12 @@ class Agent:
                 if block["type"] != "tool_use":
                     continue
                 tool_input = block.get("input") or {}
-                print(f"  -> {block['name']}({tool_input.get('path', '')})")
+                print(f"  {style.dim('->')} {style.tool_name(block['name'])}({tool_input.get('path', '')})")
                 try:
                     result = run_tool(self.workspace, block["name"], tool_input)
                     tool_results.append({"type": "tool_result", "tool_use_id": block["id"], "content": result})
                 except (ToolError, OSError) as e:
-                    print(f"     error: {e}")
+                    print(style.error(f"     error: {e}"))
                     tool_results.append(
                         {
                             "type": "tool_result",

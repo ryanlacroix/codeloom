@@ -61,6 +61,9 @@ errors (5xx), timeouts and dropped connections.
 
 At the `you>` prompt, type a request. `/reset` clears the conversation, `/exit` quits.
 
+Output is colored when it goes to a terminal. Set `NO_COLOR=1` to turn colors off, or
+`FORCE_COLOR=1` to keep them when piping output.
+
 ## Cost
 
 After each request the harness prints the tokens used and an estimated cost, plus a running
@@ -87,6 +90,7 @@ conversation, which is cheaper than carrying an old one into an unrelated task.
 | `agent.py` | Conversation loop: model settings, system prompt, tool-call handling |
 | `models.py` | Supported Claude models and their prices, used for the cost estimate |
 | `tools.py` | Tool definitions sent to Claude, and the allowlist that dispatches them |
+| `style.py` | Terminal colors, and when to turn them off |
 | `workspace.py` | Sandboxed file access, encodings, line endings, write approval |
 | `api_client.py` | HTTPS calls to the Claude API: headers, retries, errors |
 | `ollama_client.py` | Ollama Cloud client: translates Claude-format requests and replies to and from `/api/chat` |
