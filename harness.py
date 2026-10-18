@@ -41,8 +41,8 @@ except ImportError:
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 KEY_FILES = {
-    "claude": (SCRIPT_DIR / "key.txt", "Claude access token"),
-    "ollama": (SCRIPT_DIR / "ollama_key.txt", "Ollama API key"),
+    "claude": (SCRIPT_DIR.parent / "key.txt", "Claude access token"),
+    "ollama": (SCRIPT_DIR.parent / "ollama_key.txt", "Ollama API key"),
 }
 
 
