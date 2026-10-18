@@ -129,12 +129,12 @@ class Workspace:
         if len(data) > MAX_WRITE_BYTES:
             raise ToolError(f"content is too large ({len(data)} bytes, limit {MAX_WRITE_BYTES})")
         details = f"{len(data)} bytes, {encoding}" + (", CRLF" if newline == "\r\n" else "")
-        if not self.confirm(f"Claude wants to {action} {self.display(target)} ({details}).", content):
+        if not self.confirm(f"Model wants to {action} {self.display(target)} ({details}).", content):
             raise ToolError("the user declined this write")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
         self.formats[target] = (encoding, newline)
-        return f"wrote {len(data)} bytes to {self.display(target)} ({encoding})"
+        return f"wrote {len(data)} bytes to {self.display(target)}, relative to the project root ({encoding})"
 
     def confirm(self, message: str, content: str) -> bool:
         if self.auto_approve_writes:

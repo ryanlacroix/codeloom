@@ -31,6 +31,13 @@ from models import DEFAULT_MODEL, MODELS, OLLAMA_DEFAULT_MODEL
 from ollama_client import OllamaClient
 from workspace import Workspace
 
+try:
+    # Importing readline gives input() line editing (arrow keys, history).
+    # It is not available on Windows, where the console already provides this.
+    import readline  # noqa: F401
+except ImportError:
+    pass
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 KEY_FILES = {
     "claude": (SCRIPT_DIR / "key.txt", "Claude access token"),

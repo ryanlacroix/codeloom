@@ -93,7 +93,7 @@ class Agent:
                     print(f"  [{from_model} declined; {to_model} continued]")
 
             if stop_reason == "refusal":
-                print("\n  [Claude declined this request.]")
+                print("\n  [The model declined this request.]")
                 return
             if stop_reason == "max_tokens":
                 print("\n  [Response hit the max_tokens limit and was cut off.]")
@@ -113,6 +113,11 @@ class Agent:
                 except (ToolError, OSError) as e:
                     print(f"     error: {e}")
                     tool_results.append(
-                        {"type": "tool_result", "tool_use_id": block["id"], "content": f"Error: {e}", "is_error": True}
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block["id"],
+                            "content": f"Error: {e}. This tool call failed and changed nothing.",
+                            "is_error": True,
+                        }
                     )
             self.messages.append({"role": "user", "content": tool_results})
