@@ -1,13 +1,16 @@
 """Sandboxed file access: every path is confined to one project directory.
 
 Also handles text encodings (UTF-8, or a fallback such as cp1252) and line
-endings, so files are written back in the format they were read in.
+endings, so files are written back in the format they were read in. Overwrites
+are confirmed with the user, showing a coloured diff of just the areas that
+changed.
 """
 
 import codecs
 from pathlib import Path
 
 import style
+from diff import render_diff
 
 MAX_READ_BYTES = 1_000_000
 MAX_WRITE_BYTES = 1_000_000
@@ -116,10 +119,27 @@ class Workspace:
                 raise ToolError(f"read {path} before overwriting it, so its encoding and line endings are kept")
             encoding, newline = self.formats[target]
             action = "overwrite"
+            # Diff against what is on disk right now, so the user sees exactly
+            # what this write would change, including any edits made since the
+            # model read the file.
+            current = target.read_bytes()
+            if b"\x00" in current:
+                raise ToolError(f"{path} now looks like a binary file on disk; read it again before writing")
+            try:
+                old_text = current.decode(encoding)
+            except UnicodeDecodeError:
+                # The file changed on disk since it was read and no longer
+                # decodes the way it did; fall back to the usual detection.
+                old_text = self.decode(current)[0]
+            old_text = old_text.replace("\r\n", "\n")
         else:
             encoding, newline = "utf-8", "\n"
             action = "create"
-        text = content.replace("\r\n", "\n").replace("\n", newline)
+            old_text = ""
+        new_text = content.replace("\r\n", "\n")
+        if action == "overwrite" and old_text == new_text:
+            raise ToolError("nothing to change: the file on disk already has exactly this content")
+        text = new_text.replace("\n", newline)
         try:
             data = text.encode(encoding)
         except UnicodeEncodeError as e:
@@ -130,24 +150,33 @@ class Workspace:
             )
         if len(data) > MAX_WRITE_BYTES:
             raise ToolError(f"content is too large ({len(data)} bytes, limit {MAX_WRITE_BYTES})")
-        details = f"{len(data)} bytes, {encoding}" + (", CRLF" if newline == "\r\n" else "")
-        if not self.confirm(f"Model wants to {action} {self.display(target)} ({details}).", content):
+        diff_lines, additions, removals = render_diff(old_text, new_text)
+        if additions or removals:
+            changes = f"+{additions}" + (f" -{removals}" if removals else "") + " lines"
+        else:
+            changes = "no line changes"
+        details = f"{changes}, {len(data)} bytes, {encoding}" + (", CRLF" if newline == "\r\n" else "")
+        if not self.confirm(f"Model wants to {action} {self.display(target)} ({details}).", diff_lines):
             raise ToolError("the user declined this write")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
         self.formats[target] = (encoding, newline)
+        verb = "updated" if action == "overwrite" else "created"
+        print(f"  {style.success('✓')} {verb} {self.display(target)} ({details})")
         return f"wrote {len(data)} bytes to {self.display(target)}, relative to the project root ({encoding})"
 
-    def confirm(self, message: str, content: str) -> bool:
+    def confirm(self, message: str, diff_lines: list[str]) -> bool:
+        """Ask before writing, showing a coloured diff of the changed areas.
+
+        diff_lines is the pre-rendered output of diff.render_diff; an empty
+        list means nothing changes at line level (e.g. a new empty file).
+        """
         if self.auto_approve_writes:
             print(f"  {style.dim('[auto-approved]')} {message}")
             return True
         print(f"\n  {style.paint(message, style.BOLD, style.YELLOW)}")
-        preview = content.splitlines()
-        for line in preview[:20]:
-            print(f"  {style.dim('|')} {style.success(line)}")
-        if len(preview) > 20:
-            print(style.dim(f"  | ... ({len(preview) - 20} more lines)"))
+        for line in diff_lines:
+            print(f"  {style.dim('|')} {line}")
         try:
             answer = input(style.prompt("  Allow this write? [y/N] ", style.BOLD)).strip().lower()
         except EOFError:
