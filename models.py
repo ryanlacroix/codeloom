@@ -8,6 +8,10 @@ the cost shown after each turn is only an estimate based on these numbers.
 from dataclasses import dataclass
 
 DEFAULT_MODEL = "claude-opus-5-5"
+# Ollama Cloud accepts any model in its cloud catalogue (https://ollama.com/search?c=cloud).
+# It bills by subscription rather than per token, so its models are not in MODELS
+# and no cost is estimated for them.
+OLLAMA_DEFAULT_MODEL = "gemma4:31b"
 # Claude Haiku 5.5 charges a higher rate when a prompt exceeds this many tokens.
 LONG_PROMPT_TOKENS = 100_000
 # Writing to the 5-minute prompt cache costs 1.25x the normal input price.
@@ -68,7 +72,8 @@ def priced_usage(usage: dict, model_id: str, default_model_id: str) -> Usage:
     """Turn one API usage record into token counts and an estimated cost.
 
     A model that is not in MODELS (for example a fallback model) is priced at
-    the rates of default_model_id.
+    the rates of default_model_id. If that is not in MODELS either (an Ollama
+    model), the cost is left at zero.
     """
     result = Usage(
         input=usage.get("input_tokens") or 0,
@@ -76,7 +81,9 @@ def priced_usage(usage: dict, model_id: str, default_model_id: str) -> Usage:
         cache_read=usage.get("cache_read_input_tokens") or 0,
         output=usage.get("output_tokens") or 0,
     )
-    model = MODELS.get(model_id) or MODELS[default_model_id]
+    model = MODELS.get(model_id) or MODELS.get(default_model_id)
+    if model is None:
+        return result
     rates = model.rates
     if model.long_prompt_rates and result.total_input > LONG_PROMPT_TOKENS:
         rates = model.long_prompt_rates

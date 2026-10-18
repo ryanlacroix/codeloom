@@ -45,13 +45,37 @@ def retry_delay(attempt: int, retry_after: str | None) -> float:
 
 def error_message(error: urllib.error.HTTPError) -> str:
     try:
-        return json.loads(error.read())["error"]["message"]
+        detail = json.loads(error.read())["error"]
+        # Claude nests the message in an object; Ollama sends a plain string.
+        return detail if isinstance(detail, str) else detail["message"]
     except (ValueError, KeyError, TypeError):
         return str(error.reason)
 
 
+def post_json(url: str, headers: dict, body: dict) -> dict:
+    """POST a JSON body and return the decoded JSON response, retrying transient failures."""
+    data = json.dumps(body).encode("utf-8")
+    for attempt in range(MAX_RETRIES + 1):
+        request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as e:
+            if attempt < MAX_RETRIES and is_retryable(e.code):
+                time.sleep(retry_delay(attempt, e.headers.get("retry-after")))
+                continue
+            raise APIError(e.code, error_message(e)) from None
+        except ValueError:
+            raise APIError(200, "the API returned a response that is not valid JSON") from None
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            if attempt < MAX_RETRIES:
+                time.sleep(retry_delay(attempt, None))
+                continue
+            raise APIConnectionError(str(getattr(e, "reason", e))) from None
+
+
 class Client:
-    """Minimal client for the Messages API."""
+    """Minimal client for the Claude Messages API."""
 
     def __init__(self, token: str):
         self.headers = {
@@ -62,21 +86,4 @@ class Client:
         }
 
     def create_message(self, body: dict) -> dict:
-        data = json.dumps(body).encode("utf-8")
-        for attempt in range(MAX_RETRIES + 1):
-            request = urllib.request.Request(API_URL, data=data, headers=self.headers, method="POST")
-            try:
-                with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
-                    return json.load(response)
-            except urllib.error.HTTPError as e:
-                if attempt < MAX_RETRIES and is_retryable(e.code):
-                    time.sleep(retry_delay(attempt, e.headers.get("retry-after")))
-                    continue
-                raise APIError(e.code, error_message(e)) from None
-            except ValueError:
-                raise APIError(200, "the API returned a response that is not valid JSON") from None
-            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
-                if attempt < MAX_RETRIES:
-                    time.sleep(retry_delay(attempt, None))
-                    continue
-                raise APIConnectionError(str(getattr(e, "reason", e))) from None
+        return post_json(API_URL, self.headers, body)

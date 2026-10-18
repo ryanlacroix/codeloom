@@ -1,6 +1,7 @@
-"""The conversation loop: sends messages to Claude and runs the tools it calls."""
+"""The conversation loop: sends messages to the model and runs the tools it calls."""
 
 from api_client import Client
+from ollama_client import OllamaClient
 from models import MODELS, Usage, response_usage
 from tools import TOOLS, run_tool
 from workspace import ToolError, Workspace
@@ -29,10 +30,13 @@ The user must approve every write; if a write is declined, ask what they would l
 
 
 class Agent:
-    def __init__(self, client: Client, workspace: Workspace, model: str):
+    def __init__(self, client: Client | OllamaClient, workspace: Workspace, model: str):
         self.client = client
         self.workspace = workspace
         self.model = model
+        # Only Claude models have prices; Ollama Cloud is billed by subscription.
+        self.priced = model in MODELS
+        self.label = "claude" if self.priced else model
         self.messages = []
         self.session_usage = Usage()
 
@@ -47,12 +51,14 @@ class Agent:
             self.run_turn(user_text, turn_usage)
         finally:
             self.session_usage.add(turn_usage)
-            if turn_usage.total_input or turn_usage.output:
+            if (turn_usage.total_input or turn_usage.output) and self.priced:
                 print(
                     f"\n  [{turn_usage.total_input:,} input tokens ({turn_usage.cache_read:,} from cache), "
                     f"{turn_usage.output:,} output · ~${turn_usage.cost:.4f} this turn · "
                     f"~${self.session_usage.cost:.4f} this session]"
                 )
+            elif turn_usage.total_input or turn_usage.output:
+                print(f"\n  [{turn_usage.total_input:,} input tokens, {turn_usage.output:,} output]")
 
     def request_body(self) -> dict:
         body = {
@@ -64,7 +70,7 @@ class Agent:
             "output_config": {"effort": "high"},
             "cache_control": CACHE_CONTROL,
         }
-        if MODELS[self.model].fallbacks:
+        if self.priced and MODELS[self.model].fallbacks:
             body["fallbacks"] = "default"
         return body
 
@@ -80,7 +86,7 @@ class Agent:
 
             for block in content:
                 if block["type"] == "text" and block["text"].strip():
-                    print(f"\nclaude> {block['text']}")
+                    print(f"\n{self.label}> {block['text']}")
                 elif block["type"] == "fallback":
                     from_model = block.get("from", {}).get("model", "a model")
                     to_model = block.get("to", {}).get("model", "another model")
