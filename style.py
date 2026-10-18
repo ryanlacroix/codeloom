@@ -23,7 +23,7 @@ ENABLED = colors_enabled()
 
 
 def paint(text: str, *codes: str) -> str:
-    if not ENABLED:
+    if not ENABLED or not codes:
         return text
     return f"\033[{';'.join(codes)}m{text}\033[0m"
 
@@ -40,6 +40,7 @@ def prompt(text: str, *codes: str) -> str:
 
 BOLD, DIM = "1", "2"
 RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN = "31", "32", "33", "34", "35", "36"
+LIGHT_BLUE = "94"
 
 
 def bold(text: str) -> str:

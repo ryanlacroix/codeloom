@@ -54,9 +54,14 @@ python3 harness.py /path/to/project --model gpt-oss:120b --think high
 python3 harness.py /path/to/project --model <non-thinking model> --think off
 ```
 
-Replies stream in as they're written. The model's thinking is shown first, dimmed under a
+Replies stream in as they're written. The model's thinking is shown first, in light blue under a
 `thinking>` label, then the reply under the model's name. Pass `--hide-thinking` to show only the
 reply. With Claude, the thinking shown is a summary: the API never returns Claude's full reasoning.
+
+Markdown in the thinking and the reply is rendered as it streams: headings, bold, italic,
+strikethrough, inline code, code blocks, links, bullet and numbered lists, quotes, horizontal rules
+and tables (shown with aligned columns once the whole table has arrived). With colors off
+(`NO_COLOR=1` or output that isn't a terminal) the Markdown is shown as plain text.
 
 Failed requests are retried twice with backoff on rate limits (429), overloads and server
 errors (5xx), timeouts and dropped connections, as long as the reply hasn't started yet. A reply
@@ -97,6 +102,7 @@ conversation, which is cheaper than carrying an old one into an unrelated task.
 | `agent.py` | Conversation loop: model settings, system prompt, tool-call handling |
 | `models.py` | Supported Claude models and their prices, used for the cost estimate |
 | `tools.py` | Tool definitions sent to Claude, and the allowlist that dispatches them |
+| `markdown.py` | Renders the model's Markdown as styled terminal text while it streams |
 | `style.py` | Terminal colors, and when to turn them off |
 | `workspace.py` | Sandboxed file access, encodings, line endings, write approval |
 | `api_client.py` | HTTPS calls to the Claude API: headers, retries, errors |

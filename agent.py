@@ -4,6 +4,7 @@ import sys
 
 import style
 from api_client import Client
+from markdown import MarkdownStream
 from ollama_client import OllamaClient
 from models import MODELS, Usage, response_usage
 from tools import TOOLS, run_tool
@@ -56,12 +57,14 @@ def cut_off_reason(content: list) -> str:
 
 
 class StreamPrinter:
-    """Prints thinking (dimmed) and reply text as they stream in, each under its own label."""
+    """Prints thinking (light blue) and reply text as they stream in, each under its own
+    label, rendering their Markdown."""
 
     def __init__(self, label: str, show_thinking: bool):
         self.label = label
         self.show_thinking = show_thinking
         self.current = None  # "thinking", "text", or None between blocks
+        self.markdown = None  # renderer for the open block
 
     def write(self, text: str) -> None:
         sys.stdout.write(text)
@@ -76,20 +79,26 @@ class StreamPrinter:
         header = style.dim("thinking>") if kind == "thinking" else style.model_label(self.label + ">")
         self.write(f"\n{header} ")
         self.current = kind
+        self.markdown = MarkdownStream(self.write, [style.LIGHT_BLUE] if kind == "thinking" else [])
         return text.lstrip()
 
     def thinking(self, text: str) -> None:
         if self.show_thinking and (text.strip() or self.current == "thinking"):
-            self.write(style.dim(self.start("thinking", text)))
+            text = self.start("thinking", text)
+            self.markdown.feed(text)
 
     def text(self, text: str) -> None:
         if text.strip() or self.current == "text":
-            self.write(self.start("text", text))
+            text = self.start("text", text)
+            self.markdown.feed(text)
 
     def end_block(self) -> None:
         if self.current:
-            self.write("\n")
+            self.markdown.finish()
+            if not self.markdown.at_line_start:
+                self.write("\n")
             self.current = None
+            self.markdown = None
 
     def notice(self, text: str) -> None:
         self.end_block()
