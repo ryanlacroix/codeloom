@@ -1,5 +1,6 @@
 """The conversation loop: sends messages to the model and runs the tools it calls."""
 
+import shutil
 import sys
 
 import style
@@ -58,12 +59,14 @@ def cut_off_reason(content: list) -> str:
 
 class StreamPrinter:
     """Prints thinking (light blue) and reply text as they stream in, each under its own
-    label, rendering their Markdown."""
+    label, rendering their Markdown. When the thinking block ends and the reply is about
+    to start, a rule is drawn across the screen to divide them."""
 
     def __init__(self, label: str, show_thinking: bool):
         self.label = label
         self.show_thinking = show_thinking
         self.current = None  # "thinking", "text", or None between blocks
+        self.last = None  # kind of the block that closed most recently
         self.markdown = None  # renderer for the open block
 
     def write(self, text: str) -> None:
@@ -75,9 +78,18 @@ class StreamPrinter:
         the text to print (without leading whitespace when the block is new)."""
         if self.current == kind:
             return text
+        # The clients differ in when the previous block closes: the Claude stream
+        # sends content_block_stop between blocks, while Ollama switches from
+        # thinking to content mid-stream, so check both here and in end_block.
+        divider = kind == "text" and (self.current == "thinking" or self.last == "thinking")
         self.end_block()
         header = style.dim("thinking>") if kind == "thinking" else style.model_label(self.label + ">")
-        self.write(f"\n{header} ")
+        if divider:
+            # The rule takes the place of the usual blank line after the thinking.
+            self.rule()
+            self.write(f"{header} ")
+        else:
+            self.write(f"\n{header} ")
         self.current = kind
         self.markdown = MarkdownStream(self.write, [style.LIGHT_BLUE] if kind == "thinking" else [])
         return text.lstrip()
@@ -97,8 +109,16 @@ class StreamPrinter:
             self.markdown.finish()
             if not self.markdown.at_line_start:
                 self.write("\n")
+            self.last = self.current
             self.current = None
             self.markdown = None
+
+    def rule(self) -> None:
+        """A horizontal line across the screen, drawn between thinking and reply.
+
+        Full width, unlike the Markdown rules inside a reply, so the two are easy
+        to tell apart."""
+        self.write(style.dim("─" * shutil.get_terminal_size().columns) + "\n")
 
     def notice(self, text: str) -> None:
         self.end_block()
@@ -169,6 +189,8 @@ class Agent:
     def run_turn(self, user_text: str, turn_usage: Usage) -> None:
         self.messages.append({"role": "user", "content": user_text})
         while True:
+            # A fresh printer per API call: the rule only divides a tool-free
+            # thinking block from the reply streamed in the same response.
             printer = StreamPrinter(self.label, self.show_thinking)
             response = self.client.create_message(self.request_body(), printer)
             turn_usage.add(response_usage(response, self.model))
