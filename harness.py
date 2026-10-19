@@ -71,6 +71,11 @@ def main() -> None:
     parser.add_argument("dir", help="project directory the model may access (required)")
     parser.add_argument("--yes", action="store_true", help="approve file writes without asking")
     parser.add_argument(
+        "--talk",
+        action="store_true",
+        help="read-only session: every message behaves like /talk, so no files can be changed",
+    )
+    parser.add_argument(
         "--provider",
         choices=sorted(KEY_FILES),
         default="ollama",
@@ -130,7 +135,10 @@ def main() -> None:
     if args.think:
         print(f"{style.bold('Thinking:')}  {args.think}")
     print(style.dim("The model can read and write files here only. No commands can be run."))
-    print(style.dim("Start a message with /talk to ask without any files being changed."))
+    if args.talk:
+        print(style.warning("Read-only mode: every message behaves like /talk; no files can be changed."))
+    else:
+        print(style.dim("Start a message with /talk to ask without any files being changed."))
     print(style.dim("Type /reset to clear the conversation, /exit to quit.") + "\n")
 
     while True:
@@ -151,13 +159,18 @@ def main() -> None:
                 print(style.dim("  [conversation cleared]"))
             continue
 
-        read_only = user_text == "/talk" or user_text.startswith(("/talk ", "/talk\t"))
+        # With --talk every message is read-only; otherwise the /talk prefix makes
+        # just this message read-only. The prefix is stripped in both cases.
+        read_only = args.talk or user_text == "/talk" or user_text.startswith(("/talk ", "/talk\t"))
         if read_only:
-            user_text = user_text[len("/talk") :].strip()
-            if not user_text:
-                print(style.dim("  [usage: /talk <question>; the model can read files but not change them]"))
-                continue
-            print(style.dim("  [read-only: no files will be changed]"))
+            if user_text.startswith("/talk"):
+                user_text = user_text[len("/talk") :].strip()
+                if not user_text:
+                    print(style.dim("  [usage: /talk <question>; the model can read files but not change them]"))
+                    continue
+                if not args.talk:
+                    # With --talk the read-only state was already announced at startup.
+                    print(style.dim("  [read-only: no files will be changed]"))
 
         history_len = len(agent.messages)
         try:

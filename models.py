@@ -11,7 +11,7 @@ DEFAULT_MODEL = "claude-opus-5-5"
 # Ollama Cloud accepts any model in its cloud catalogue (https://ollama.com/search?c=cloud).
 # It bills by subscription rather than per token, so its models are not in MODELS
 # and no cost is estimated for them.
-OLLAMA_DEFAULT_MODEL = "gemma4:31b"
+OLLAMA_DEFAULT_MODEL = "glm-5.3-flash"
 # Claude Haiku 5.5 charges a higher rate when a prompt exceeds this many tokens.
 LONG_PROMPT_TOKENS = 100_000
 # Writing to the 5-minute prompt cache costs 1.25x the normal input price.
@@ -50,7 +50,7 @@ MODELS = {
 class Usage:
     """Token counts and estimated cost, accumulated across API calls."""
 
-    input: int = 0  # uncached input
+    input: int = 0  # uncached input tokens
     cache_write: int = 0
     cache_read: int = 0
     output: int = 0
