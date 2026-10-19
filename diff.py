@@ -1,6 +1,6 @@
 """Coloured unified diffs for the write-permission prompt.
 
-Like Claude Code, render_diff shows only the areas that changed: each change
+render_diff shows only the areas that changed: each change
 plus CONTEXT unchanged lines around it, with the unchanged regions between
 changes collapsed behind '@@' hunk headers. Removed lines are red, added lines
 green, context lines dim, and hunk headers cyan.
