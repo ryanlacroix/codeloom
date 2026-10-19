@@ -45,6 +45,22 @@ KEY_FILES = {
     "ollama": (SCRIPT_DIR.parent / "ollama_key.txt", "Ollama API key"),
 }
 
+# Slash commands typed at the "you>" prompt; /help lists these.
+COMMANDS = [
+    ("/help", "show this list of commands"),
+    ("/talk <question>", "ask the model something without any files being changed"),
+    ("/reset", "clear the conversation and start over"),
+    ("/exit", "leave the harness (also: /quit)"),
+]
+
+
+def print_commands() -> None:
+    width = max(len(name) for name, _ in COMMANDS)
+    print()
+    for name, what in COMMANDS:
+        print(f"  {style.bold(name.ljust(width))}  {what}")
+    print()
+
 
 def read_key(provider: str) -> str:
     key_file, what = KEY_FILES[provider]
@@ -139,7 +155,7 @@ def main() -> None:
         print(style.warning("Read-only mode: every message behaves like /talk; no files can be changed."))
     else:
         print(style.dim("Start a message with /talk to ask without any files being changed."))
-    print(style.dim("Type /reset to clear the conversation, /exit to quit.") + "\n")
+    print(style.dim("Type /help to list commands, /reset to clear the conversation, /exit to quit.") + "\n")
 
     while True:
         try:
@@ -157,6 +173,9 @@ def main() -> None:
                 print(style.dim(f"  [conversation cleared; ~${agent.session_usage.cost:.4f} spent this session]"))
             else:
                 print(style.dim("  [conversation cleared]"))
+            continue
+        if user_text == "/help":
+            print_commands()
             continue
 
         # With --talk every message is read-only; otherwise the /talk prefix makes
