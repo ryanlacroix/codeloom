@@ -25,6 +25,7 @@ import stat
 import sys
 from pathlib import Path
 
+import splash
 import style
 from agent import Agent
 from api_client import APIConnectionError, APIError, Client
@@ -203,6 +204,7 @@ def main() -> None:
         make_client(args.provider, args.think), workspace, model=args.model, show_thinking=not args.hide_thinking
     )
 
+    splash.print_splash()
     print(f"{style.bold('Workspace:')} {workspace.root}")
     print(f"{style.bold('Model:')}     {style.model_label(args.model)} {style.dim(f'({args.provider})')}")
     if args.think:
