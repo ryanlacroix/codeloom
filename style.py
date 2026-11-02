@@ -1,4 +1,4 @@
-"""Terminal colors for the harness's output.
+"""Terminal output control for the harness: colors, plus the console clear at startup.
 
 Colors are used only when stdout is a terminal, and can be turned off with the
 NO_COLOR environment variable (https://no-color.org) or forced on with FORCE_COLOR.
@@ -20,6 +20,21 @@ def colors_enabled() -> bool:
 
 
 ENABLED = colors_enabled()
+
+
+def clear_screen() -> None:
+    """Wipe the console, used once when the harness starts, before anything else
+    is printed, so every run begins on a clean screen.
+
+    Like the modern "clear" command: moves the cursor home, clears the visible
+    screen, and erases the scrollback as well (the \\033[3J part; terminals that
+    predate it simply ignore that sequence). Skipped unless escape codes are safe
+    to write, per the same ENABLED gate as colors: redirected or piped output and
+    the classic Windows console stay free of control-code litter."""
+    if not ENABLED:
+        return
+    sys.stdout.write("\033[H\033[2J\033[3J")
+    sys.stdout.flush()
 
 
 def paint(text: str, *codes: str) -> str:

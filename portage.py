@@ -147,6 +147,9 @@ def ensure_gitignored(root: Path) -> None:
 
 
 def main() -> None:
+    # Clear the console before anything is printed, including argparse usage
+    # errors and the key-file warning (which used to precede the splash).
+    style.clear_screen()
     parser = argparse.ArgumentParser(description="Locked-down file-only coding agent for Claude or Ollama Cloud.")
     parser.add_argument("dir", help="project directory the model may access (required)")
     parser.add_argument("--yes", action="store_true", help="approve file writes without asking")
