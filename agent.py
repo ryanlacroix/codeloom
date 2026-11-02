@@ -207,6 +207,21 @@ class Agent:
             elif turn_usage.total_input or turn_usage.output:
                 print("\n" + style.dim(f"  [{turn_usage.total_input:,} input tokens, {turn_usage.output:,} output]"))
 
+    def last_reply_text(self) -> str:
+        """The text of the newest assistant reply, without thinking or tool calls.
+
+        Empty when the latest assistant message had no text at all, which happens
+        e.g. when a response was cut off while it was still thinking.
+        """
+        for message in reversed(self.messages):
+            if message.get("role") == "assistant":
+                return "".join(
+                    block["text"]
+                    for block in message.get("content", [])
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+        return ""
+
     def request_body(self) -> dict:
         body = {
             "model": self.model,

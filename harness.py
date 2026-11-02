@@ -45,6 +45,12 @@ KEY_FILES = {
     "ollama": (SCRIPT_DIR.parent / "ollama_key.txt", "Ollama API key"),
 }
 
+# Plans are saved here, under the project root, so they survive restarts and can be
+# read or diffed outside the conversation. The directory is kept out of git by a
+# .gitignore entry that is added automatically the first time a plan is saved.
+PLAN_DIR = ".slim-harness-temp"
+PLAN_FILE = "plan.md"
+
 # Slash commands typed at the "you>" prompt; /help lists these.
 COMMANDS = [
     ("/help", "show this list of commands"),
@@ -83,6 +89,54 @@ def read_key(provider: str) -> str:
 def make_client(provider: str, think: str | None) -> Client | OllamaClient:
     key = read_key(provider)
     return OllamaClient(key, think=think) if provider == "ollama" else Client(key)
+
+
+def save_plan(root: Path, agent: Agent) -> None:
+    """Save the newest plan reply to .slim-harness-temp/plan.md.
+
+    Trusted harness code writes this directly (not through the model's sandboxed
+    tools), so saving needs no approval, and the directory is created if missing.
+    Failures are reported but never fatal.
+    """
+    text = agent.last_reply_text()
+    if not text.strip():
+        print(style.dim("  [the reply had no plan text; nothing saved]"))
+        return
+    text = text if text.endswith("\n") else text + "\n"
+    try:
+        (root / PLAN_DIR).mkdir(parents=True, exist_ok=True)
+        (root / PLAN_DIR / PLAN_FILE).write_text(text, encoding="utf-8", newline="\n")
+    except OSError as e:
+        print(style.warning(f"  [could not save the plan to {PLAN_DIR}/{PLAN_FILE}: {e}]"))
+        return
+    print(style.dim(f"  [plan saved to {PLAN_DIR}/{PLAN_FILE}]"))
+    ensure_gitignored(root)
+
+
+def ensure_gitignored(root: Path) -> None:
+    """Add .slim-harness-temp/ to .gitignore unless a spelling of it is already listed.
+
+    The file is created if it does not exist. Existing bytes are kept as they are:
+    the entry is appended, so no re-encoding of the rest of the file can corrupt it.
+    """
+    gitignore = root / ".gitignore"
+    try:
+        data = gitignore.read_bytes()
+    except FileNotFoundError:
+        data = b""
+    except OSError as e:
+        print(style.warning(f"  [could not read {gitignore}: {e}]"))
+        return
+    # Any spelling counts as present: with or without a leading or trailing slash.
+    if any(line.strip().strip("/") == PLAN_DIR for line in data.decode("utf-8", "replace").splitlines()):
+        return
+    try:
+        with gitignore.open("ab") as f:
+            f.write((b"" if not data or data.endswith(b"\n") else b"\n") + f"{PLAN_DIR}/\n".encode("utf-8"))
+    except OSError as e:
+        print(style.warning(f"  [could not update {gitignore}: {e}]"))
+        return
+    print(style.dim(f"  [.gitignore now ignores {PLAN_DIR}/]"))
 
 
 def main() -> None:
@@ -244,6 +298,7 @@ def main() -> None:
                 plan_mode = False
             elif plan in ("start", "update"):
                 plan_mode = True
+                save_plan(root, agent)
                 print(style.dim("  [/ok to approve and implement the plan; anything else revises it]"))
         except KeyboardInterrupt:
             print("\n" + style.warning("  [interrupted]"))
