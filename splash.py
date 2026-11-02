@@ -15,8 +15,8 @@ import style
 # "PORTAGE" in the block-shading (▀▄█) figlet style, kept exactly as generated
 # (leading blank line and trailing whitespace trimmed; see
 # .portage-temp/splash-text.txt).
-ART = r"""▄▄▄▄▄▄▄
-███▀▀███▄              ██
+ART = r"""▄▄▄▄▄▄▄                                        ▄
+███▀▀███▄              ██                    ▀▀█▀▀
 ███▄▄███▀ ▄███▄ ████▄ ▀██▀▀ ▀▀█▄ ▄████ ▄█▀█▄
 ███▀▀▀▀   ██ ██ ██ ▀▀  ██  ▄█▀██ ██ ██ ██▄█▀
 ███       ▀███▀ ██     ██  ▀█▄██ ▀████ ▀█▄▄▄
