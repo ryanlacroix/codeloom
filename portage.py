@@ -59,6 +59,8 @@ PLAN_FILE = "plan.md"
 # Slash commands typed at the "you>" prompt; /help lists these.
 COMMANDS = [
     ("/help", "show this list of commands"),
+    ("/think-on", "turn thinking on for all later messages"),
+    ("/think-off", "turn thinking off for all later messages"),
     ("/talk <question>", "ask the model something without any files being changed"),
     ("/plan <task>", "propose an implementation plan for the task, changing no files"),
     ("/ok", "approve the current plan and have the model implement it"),
@@ -212,7 +214,7 @@ def main() -> None:
     print(f"{style.bold('Workspace:')} {workspace.root}")
     print(f"{style.bold('Model:')}     {style.model_label(args.model)} {style.dim(f'({args.provider})')}")
     if args.think:
-        print(f"{style.bold('Thinking:')}  {args.think}")
+        print(f"{style.bold('Thinking:')}  {args.think} {style.dim('(toggle with /think-on, /think-off)')}")
     print(style.dim("The model can read and write files here only. No commands can be run."))
     if args.talk:
         print(style.warning("Read-only mode: every message behaves like /talk; no files can be changed."))
@@ -248,6 +250,21 @@ def main() -> None:
             continue
         if user_text == "/help":
             print_commands()
+            continue
+        # /think-on and /think-off toggle model thinking for all later messages, in
+        # either prompt (in plan mode the setting is applied and the `plan>` prompt
+        # returns with its pending plan intact). Anything typed after the command
+        # word is ignored, and nothing is sent to the model. Handled here, before
+        # the planning state machine, like /reset and /help.
+        if user_text.startswith("/think-on") or user_text.startswith("/think-off"):
+            on = user_text.startswith("/think-on")
+            agent.show_thinking = on
+            if not agent.priced:
+                # Ollama: "off" stops thinking server-side as well as hiding it, and
+                # turning it back on restores the startup --think setting, which may
+                # be a level (low/medium/high) rather than plain "on".
+                agent.client.think = args.think if on else "off"
+            print(style.dim(f"  [thinking {'on' if on else 'off'}]"))
             continue
 
         # Planning state machine. plan tells Agent.send what kind of message this is:

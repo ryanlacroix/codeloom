@@ -87,7 +87,8 @@ def cut_off_reason(content: list) -> str:
     if types and types <= {"thinking", "redacted_thinking"}:
         return (
             f"Response hit the {MAX_TOKENS:,}-token output limit while still thinking, so there is no "
-            "answer. Ask for smaller steps, or with Ollama try --think low or --think off."
+            "answer. Ask for smaller steps, or turn thinking off for later messages with /think-off "
+            "(with Ollama, --think low at startup sets a shorter budget)."
         )
     return f"Response hit the {MAX_TOKENS:,}-token output limit and was cut off."
 
