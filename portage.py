@@ -48,7 +48,7 @@ KEY_FILES = {
 # Plans are saved here, under the project root, so they survive restarts and can be
 # read or diffed outside the conversation. The directory is kept out of git by a
 # .gitignore entry that is added automatically the first time a plan is saved.
-PLAN_DIR = ".slim-harness-temp"
+PLAN_DIR = ".portage-temp"
 PLAN_FILE = "plan.md"
 
 # Slash commands typed at the "you>" prompt; /help lists these.
@@ -92,7 +92,7 @@ def make_client(provider: str, think: str | None) -> Client | OllamaClient:
 
 
 def save_plan(root: Path, agent: Agent) -> None:
-    """Save the newest plan reply to .slim-harness-temp/plan.md.
+    """Save the newest plan reply to .portage-temp/plan.md.
 
     Trusted harness code writes this directly (not through the model's sandboxed
     tools), so saving needs no approval, and the directory is created if missing.
@@ -114,7 +114,7 @@ def save_plan(root: Path, agent: Agent) -> None:
 
 
 def ensure_gitignored(root: Path) -> None:
-    """Add .slim-harness-temp/ to .gitignore unless a spelling of it is already listed.
+    """Add .portage-temp/ to .gitignore unless a spelling of it is already listed.
 
     The file is created if it does not exist. Existing bytes are kept as they are:
     the entry is appended, so no re-encoding of the rest of the file can corrupt it.
