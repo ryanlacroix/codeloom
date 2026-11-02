@@ -40,6 +40,33 @@ READ_ONLY_NOTE = (
     "Do not write or change any files; write_file is disabled for this message.]\n\n"
 )
 
+# Prepended to a /plan message. Also read-only at dispatch: the model may look
+# around the project, but its answer is a plan, not the implementation itself.
+PLAN_NOTE = (
+    "[Plan request: reply with a concise implementation plan, not the implementation. First "
+    "look around the project with list_directory and read_file as needed, then answer with: "
+    "the goal in one sentence, a short numbered list of steps, which files would be created "
+    "or changed, and anything the user would need to run themselves (tests, builds, commands). "
+    "Do not write or change any files; write_file is disabled for this message.]\n\n"
+)
+
+# Prepended to an ordinary message while a plan is being discussed: the user is
+# refining the plan, not asking for the work to start. Read-only at dispatch too.
+PLAN_FEEDBACK_NOTE = (
+    "[Plan update: the user is giving feedback on the implementation plan you proposed. Stay in "
+    "planning mode: revise the plan accordingly and present the full revised plan concisely — "
+    "goal, numbered steps, files to create or change, anything the user must run themselves. "
+    "Do not implement it, and do not write or change any files; write_file is disabled for "
+    "this message.]\n\n"
+)
+
+# Prepended when the user accepts the plan: this is the signal to do the work,
+# and write_file is available again.
+PLAN_APPROVED_NOTE = (
+    "[Plan approved: implement the plan above now, making the file changes it describes, "
+    "one step at a time.]\n\n"
+)
+
 
 def cut_off_reason(content: list) -> str:
     """Explain a response that hit MAX_TOKENS, based on what it had produced so far."""
@@ -140,17 +167,28 @@ class Agent:
         self.session_usage = Usage()
         self.read_only = False
 
-    def send(self, user_text: str, read_only: bool = False) -> None:
+    def send(self, user_text: str, read_only: bool = False, plan: str | None = None) -> None:
         """Run one user turn, then print its token usage and estimated cost.
 
         With read_only, the model may list and read files but every write is refused.
+        plan selects the planning behaviour, where each note is prepended to the user
+        text (keeping the system prompt and tool list cacheable):
+          "start"    /plan <task>: answer with a concise implementation plan (read-only)
+          "update"   a plan-mode message: revise the plan accordingly (read-only)
+          "approved" the user accepted the plan: implement it now (writes allowed)
 
         The summary is printed even if the turn fails part-way, because the
         API calls that did complete are still billed.
         """
         turn_usage = Usage()
-        self.read_only = read_only
-        if read_only:
+        self.read_only = read_only or plan in ("start", "update")
+        if plan == "start":
+            user_text = PLAN_NOTE + user_text
+        elif plan == "update":
+            user_text = PLAN_FEEDBACK_NOTE + user_text
+        elif plan == "approved":
+            user_text = PLAN_APPROVED_NOTE + user_text
+        elif read_only:
             user_text = READ_ONLY_NOTE + user_text
         try:
             self.run_turn(user_text, turn_usage)
@@ -223,7 +261,7 @@ class Agent:
                 print(f"  {style.dim('->')} {style.tool_name(block['name'])}({tool_input.get('path', '')})")
                 try:
                     if self.read_only and block["name"] == "write_file":
-                        raise ToolError("writes are disabled: the user sent this message with /talk (read-only)")
+                        raise ToolError("writes are disabled: this message is read-only (sent with /talk or /plan)")
                     result = run_tool(self.workspace, block["name"], tool_input)
                     tool_results.append({"type": "tool_result", "tool_use_id": block["id"], "content": result})
                 except (ToolError, OSError) as e:

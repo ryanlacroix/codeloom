@@ -49,6 +49,9 @@ KEY_FILES = {
 COMMANDS = [
     ("/help", "show this list of commands"),
     ("/talk <question>", "ask the model something without any files being changed"),
+    ("/plan <task>", "propose an implementation plan for the task, changing no files"),
+    ("/ok", "approve the current plan and have the model implement it"),
+    ("/cancel", "leave plan mode without implementing the plan"),
     ("/reset", "clear the conversation and start over"),
     ("/exit", "leave the harness (also: /quit)"),
 ]
@@ -154,12 +157,20 @@ def main() -> None:
     if args.talk:
         print(style.warning("Read-only mode: every message behaves like /talk; no files can be changed."))
     else:
-        print(style.dim("Start a message with /talk to ask without any files being changed."))
+        print(style.dim("Start a message with /talk to ask, or /plan to get a plan to approve, without any files being changed."))
     print(style.dim("Type /help to list commands, /reset to clear the conversation, /exit to quit.") + "\n")
+
+    # While a plan is being discussed (after /plan, until it is approved or abandoned),
+    # ordinary messages revise the plan instead of asking for work, write_file stays
+    # disabled, and the prompt is "plan>" to make the mode visible.
+    plan_mode = False
 
     while True:
         try:
-            user_text = input(style.prompt("you> ", style.BOLD, style.GREEN)).strip()
+            if plan_mode:
+                user_text = input(style.prompt("plan> ", style.BOLD, style.MAGENTA)).strip()
+            else:
+                user_text = input(style.prompt("you> ", style.BOLD, style.GREEN)).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -169,6 +180,7 @@ def main() -> None:
             break
         if user_text == "/reset":
             agent.messages = []
+            plan_mode = False
             if agent.priced:
                 print(style.dim(f"  [conversation cleared; ~${agent.session_usage.cost:.4f} spent this session]"))
             else:
@@ -178,22 +190,61 @@ def main() -> None:
             print_commands()
             continue
 
-        # With --talk every message is read-only; otherwise the /talk prefix makes
-        # just this message read-only. The prefix is stripped in both cases.
-        read_only = args.talk or user_text == "/talk" or user_text.startswith(("/talk ", "/talk\t"))
-        if read_only:
-            if user_text.startswith("/talk"):
-                user_text = user_text[len("/talk") :].strip()
+        # Planning state machine. plan tells Agent.send what kind of message this is:
+        # "start" proposes a plan, "update" revises it, "approved" implements it.
+        plan = None
+        if user_text == "/ok":
+            if not plan_mode:
+                print(style.dim("  [no plan to accept — start one with /plan <task>]"))
+                continue
+            plan = "approved"
+            user_text = ""  # the approval note is all the model needs; prepended by agent.send
+            print(style.dim("  [plan approved]"))
+        elif user_text == "/cancel":
+            if not plan_mode:
+                print(style.dim("  [not in plan mode]"))
+                continue
+            plan_mode = False
+            print(style.dim("  [plan mode off; the plan stays in the conversation]"))
+            continue
+        else:
+            if user_text == "/plan" or user_text.startswith(("/plan ", "/plan\t")):
+                user_text = user_text[len("/plan") :].strip()
                 if not user_text:
-                    print(style.dim("  [usage: /talk <question>; the model can read files but not change them]"))
+                    print(style.dim("  [usage: /plan <task>; the model proposes a plan and changes no files]"))
                     continue
-                if not args.talk:
-                    # With --talk the read-only state was already announced at startup.
-                    print(style.dim("  [read-only: no files will be changed]"))
+                plan = "start"
+                print(style.dim("  [plan mode: the model will propose what to implement; no files will be changed]"))
+            elif plan_mode and not (
+                user_text == "/talk" or user_text.startswith(("/talk ", "/talk\t"))
+            ):
+                # Ordinary messages while planning are feedback that revises the plan;
+                # /talk stays a side question and cannot change files either.
+                plan = "update"
+                print(style.dim("  [plan mode: this message revises the plan; no files will be changed]"))
+
+        # With --talk every message is read-only; the /talk prefix makes just its
+        # message read-only. The prefix is stripped in both cases.
+        read_only = args.talk or user_text == "/talk" or user_text.startswith(("/talk ", "/talk\t"))
+        if read_only and user_text.startswith("/talk"):
+            user_text = user_text[len("/talk") :].strip()
+            if not user_text:
+                print(style.dim("  [usage: /talk <question>; the model can read files but not change them]"))
+                continue
+            if not args.talk:
+                # With --talk the read-only state was already announced at startup.
+                print(style.dim("  [read-only: no files will be changed]"))
 
         history_len = len(agent.messages)
         try:
-            agent.send(user_text, read_only=read_only)
+            agent.send(user_text, read_only=read_only, plan=plan)
+            # Plan state advances only once the turn fully succeeded, so a failed or
+            # interrupted turn leaves the previous state in place.
+            if plan == "approved":
+                plan_mode = False
+            elif plan in ("start", "update"):
+                plan_mode = True
+                print(style.dim("  [/ok to approve and implement the plan; anything else revises it]"))
         except KeyboardInterrupt:
             print("\n" + style.warning("  [interrupted]"))
             del agent.messages[history_len:]
