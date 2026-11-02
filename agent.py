@@ -19,6 +19,10 @@ MAX_TOKENS = 16000
 # is append-only, so earlier messages must never be edited.
 CACHE_CONTROL = {"type": "ephemeral"}
 
+# Tools that change files. Refused by name in read-only messages (/talk, /plan)
+# so the tool list itself can stay identical in every request.
+WRITE_TOOLS = {"write_file", "edit_file", "append_file"}
+
 SYSTEM_PROMPT = """You are a coding assistant working inside a single project directory.
 
 You can only list directories, read files, and write files, using the tools provided. \
@@ -27,14 +31,18 @@ All paths are relative to the project root. When a task would normally require r
 something (tests, builds, scripts), make the file changes and tell the user what to run \
 themselves.
 
-You must read an existing file before overwriting it. write_file replaces the whole file, \
-so always write the complete new contents. Existing files are saved back in their original \
-encoding and line endings; if read_file says a file is not UTF-8, only use characters that \
-encoding can represent. Binary files (for example .xlsx or .dll) cannot be read or written. \
-The user must approve every write; if a write is declined, ask what they would like instead."""
+You must read an existing file before editing or overwriting it. write_file replaces the whole \
+file; edit_file replaces one exact snippet, which costs far fewer output tokens, so prefer it \
+for changes to existing files. Keep what each response has to produce small: build long new \
+files in several append_file chunks (roughly one per 150 lines) rather than one write_file, \
+and do not combine a large write with other tool calls in the same response. Existing files \
+are saved back in their original encoding and line endings; if read_file says a file is not \
+UTF-8, only use characters that encoding can represent. Binary files (for example .xlsx or \
+.dll) cannot be read or written. The user must approve every write; if a write is declined, \
+ask what they would like instead."""
 
 # Prepended to a /talk message. The tool list stays the same (changing it would
-# invalidate the prompt cache), so write_file is also refused at dispatch.
+# invalidate the prompt cache), so the write tools are also refused at dispatch.
 READ_ONLY_NOTE = (
     "[Read-only message: answer using list_directory and read_file only. "
     "Do not write or change any files; write_file is disabled for this message.]\n\n"
@@ -275,7 +283,7 @@ class Agent:
                 tool_input = block.get("input") or {}
                 print(f"  {style.dim('->')} {style.tool_name(block['name'])}({tool_input.get('path', '')})")
                 try:
-                    if self.read_only and block["name"] == "write_file":
+                    if self.read_only and block["name"] in WRITE_TOOLS:
                         raise ToolError("writes are disabled: this message is read-only (sent with /talk or /plan)")
                     result = run_tool(self.workspace, block["name"], tool_input)
                     tool_results.append({"type": "tool_result", "tool_use_id": block["id"], "content": result})

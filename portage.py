@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """A minimal, locked-down agentic coding harness for Claude or Ollama Cloud models.
 
-The model gets exactly three tools, all confined to a single workspace directory:
+The model gets exactly five tools, all confined to a single workspace directory:
   - list_directory: list entries in a directory
   - read_file:      read a text file (UTF-8, or the fallback encoding, cp1252 by default)
   - write_file:     create or overwrite a text file (asks you first); existing files
                     keep their original encoding and line endings
+  - edit_file:      replace one exact snippet in a file instead of rewriting it whole,
+                    which costs a fraction of the output tokens
+  - append_file:    add text to the end of a file, or create it; a long file can be
+                    written in several chunks, one per model response
 
 There is deliberately no tool for running commands, and no module here ever
-imports subprocess or calls os.system / exec / eval. Claude can only read and
+imports subprocess or calls os.system / exec / eval. The model can only read and
 write files inside the workspace; any path that resolves outside it (via "..",
 absolute paths, or symlinks) is rejected.
 
