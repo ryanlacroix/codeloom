@@ -19,13 +19,25 @@ TOOLS = [
     },
     {
         "name": "read_file",
-        "description": "Read the full contents of a text file inside the project. Line endings "
-        "are shown as '\\n'. If the file is not UTF-8, the result starts with a note naming its encoding.",
+        "description": "Read a text file inside the project. A read never returns more than a 1 MB "
+        "page of text: larger files are cut at a line boundary, with a note giving the line range "
+        "shown and the offset to continue from. Use offset (1-based first line) and limit (maximum "
+        "lines) to page through a large file; paging line numbers agree with search results. Line "
+        "endings are shown as '\\n'. If the file is not UTF-8, the result starts with a note naming "
+        "its encoding.",
         "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "File path relative to the project root."}
+                "path": {"type": "string", "description": "File path relative to the project root."},
+                "offset": {
+                    "type": "integer",
+                    "description": "1-based number of the first line to read; omit to read from the first line.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of lines to read; omit for no line limit (the byte cap still applies).",
+                },
             },
             "required": ["path"],
             "additionalProperties": False,
@@ -134,7 +146,11 @@ def run_tool(workspace: Workspace, name: str, tool_input: dict) -> str | list:
     if name == "list_directory":
         return workspace.list_directory(tool_input.get("path"))
     if name == "read_file":
-        return workspace.read_file(tool_input.get("path"))
+        return workspace.read_file(
+            tool_input.get("path"),
+            offset=tool_input.get("offset", 0),
+            limit=tool_input.get("limit", 0),
+        )
     if name == "search":
         return workspace.search(
             tool_input.get("pattern"),

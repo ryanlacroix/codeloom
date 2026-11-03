@@ -3,7 +3,8 @@
 
 The model gets exactly six tools, all confined to a single workspace directory:
   - list_directory: list entries in a directory
-  - read_file:      read a text file (UTF-8, or the fallback encoding, cp1252 by default)
+  - read_file:      read a text file (UTF-8, or the fallback encoding, cp1252 by default),
+                    paged by line (offset/limit) so files of any size are readable in slices
   - search:         regex-search file contents ('path:line: text' per match) without
                     reading whole files; results are capped and binary files are skipped
   - write_file:     create or overwrite a text file (asks you first); existing files

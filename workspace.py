@@ -87,18 +87,36 @@ class Workspace:
                 continue
         raise ToolError("could not decode file")
 
-    def read_file(self, path: str) -> str | list:
+    def read_file(self, path: str, offset: int = 0, limit: int = 0) -> str | list:
+        """Read a text file, optionally as a page of its lines.
+
+        offset is the 1-based number of the first line to return and limit the
+        maximum number of lines; both default to 0 (no window). A read never
+        returns more than MAX_READ_BYTES of text: larger files (or pages) are
+        cut at a line boundary where possible, followed by a note naming the
+        line range shown and the offset to continue from, so files of any size
+        can be read in slices. Line numbers here match search results. Every
+        read records the file's encoding and line endings, so a paged read
+        also counts as the read required before editing or overwriting.
+        """
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            raise ToolError("offset must be a non-negative integer (1-based first line to read)")
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
+            raise ToolError("limit must be a non-negative integer (maximum number of lines)")
         target = self.resolve(path)
         if not target.is_file():
             raise ToolError(f"not a file: {path}")
-        size = target.stat().st_size
-        if size > MAX_READ_BYTES:
-            raise ToolError(f"file is too large to read ({size} bytes, limit {MAX_READ_BYTES})")
         data = target.read_bytes()
         # The fallback encodings accept any bytes, so binary files must be
         # caught here rather than by a decode error.
         if b"\x00" in data:
             raise ToolError(f"{path} appears to be a binary file and cannot be read")
+        if not offset and not limit and len(data) <= MAX_READ_BYTES:
+            return self._read_whole(target, path, data)
+        return self._read_window(target, path, data, offset, limit)
+
+    def _read_whole(self, target: Path, path: str, data: bytes) -> str | list:
+        """Small read within the one-call cap: the decoded text, byte for byte."""
         text, encoding = self.decode(data)
         newline = "\r\n" if "\r\n" in text else "\n"
         self.formats[target] = (encoding, newline)
@@ -110,6 +128,65 @@ class Workspace:
             f"{encoding}, so only use characters that {encoding} can represent.]"
         )
         return [{"type": "text", "text": note}, {"type": "text", "text": text}]
+
+    def _read_window(self, target: Path, path: str, data: bytes, offset: int, limit: int) -> str | list:
+        """Line-windowed read for large files and explicit offset/limit reads.
+
+        Lines are reported without their trailing newlines. The page is capped
+        at MAX_READ_BYTES bytes: cut at the last line boundary that fits, or,
+        when even one line is longer than that, mid-line (with a note saying
+        to use search inside such lines). Notes carry the line range shown;
+        line numbers here match search results.
+        """
+        text, encoding = self.decode(data)
+        newline = "\r\n" if "\r\n" in text else "\n"
+        self.formats[target] = (encoding, newline)
+        notes = []
+        if encoding not in ("utf-8", "utf-8-sig"):
+            notes.append(
+                f"[Note: this file is encoded as {encoding}, not UTF-8. It will be saved back as "
+                f"{encoding}, so only use characters that {encoding} can represent.]"
+            )
+        rows = text.replace("\r\n", "\n").split("\n")
+        if rows and rows[-1] == "":
+            rows.pop()  # the trailing newline is layout, not a line
+        if offset > len(rows):
+            raise ToolError(
+                f"offset {offset} is past the end of the file, which has {len(rows)} lines "
+                "(offset is 1-based, so use 1 for the first line)"
+            )
+        first = offset or 1  # 1-based number of the first line shown
+        chosen = rows[first - 1 :]
+        if limit:
+            chosen = chosen[:limit]
+        page = "\n".join(chosen)
+        encoded = page.encode(encoding)
+        cut = len(encoded) > MAX_READ_BYTES
+        if cut:
+            head = encoded[:MAX_READ_BYTES]
+            end = head.rfind(b"\n")
+            if end != -1:
+                head = head[:end]
+            page = head.decode(encoding, errors="ignore")
+        shown_to = first + page.count("\n")
+        if cut:
+            if end == -1:
+                notes.append(
+                    f"[Note: line {shown_to} is longer than the {MAX_READ_BYTES:,}-byte page cap, so "
+                    "only its first part is shown (use search to find text inside very long lines)"
+                )
+            else:
+                notes.append(f"[Note: the page was cut at {MAX_READ_BYTES:,} bytes]")
+        if shown_to < len(rows):
+            notes.append(
+                f"[Note: showing lines {first}-{shown_to} of {len(rows)} of {path}; continue with "
+                f"read_file('{path}', offset={shown_to + 1}" + (f", limit={limit}" if limit else "") + ")]"
+            )
+        if notes:
+            blocks = [{"type": "text", "text": note} for note in notes]
+            blocks.append({"type": "text", "text": page or "(no text on these lines)"})
+            return blocks
+        return page or "(empty file)"
 
     def search(self, pattern: str, path: str = ".", ignore_case: bool = False, max_results: int = 50) -> str:
         """Regex-search file contents without reading files into the conversation.
