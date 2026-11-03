@@ -178,6 +178,18 @@ class Agent:
         self.session_usage = Usage()
         self.read_only = False
 
+    def set_model(self, model: str) -> None:
+        """Switch the model used for later messages (/model, like --model at startup).
+
+        request_body() reads self.model on every call, so the change takes effect on
+        the next message while the conversation history is kept. priced and label are
+        re-derived from the model here, exactly as in __init__.
+        """
+        self.model = model
+        # Only Claude models have prices; Ollama Cloud is billed by subscription.
+        self.priced = model in MODELS
+        self.label = "claude" if self.priced else model
+
     def send(self, user_text: str, read_only: bool = False, plan: str | None = None) -> None:
         """Run one user turn, then print its token usage and estimated cost.
 

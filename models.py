@@ -12,6 +12,9 @@ DEFAULT_MODEL = "claude-opus-5-5"
 # It bills by subscription rather than per token, so its models are not in MODELS
 # and no cost is estimated for them.
 OLLAMA_DEFAULT_MODEL = "glm-5.3-flash"
+# Models listed by the /model command. A short fixed stub for now: /model with no
+# argument prints these, and /model <name> switches to <name>.
+OLLAMA_MODELS = ("glm-5.3", "glm-5.3-flash", "minimax-m3")
 # Claude Haiku 5.5 charges a higher rate when a prompt exceeds this many tokens.
 LONG_PROMPT_TOKENS = 100_000
 # Writing to the 5-minute prompt cache costs 1.25x the normal input price.
