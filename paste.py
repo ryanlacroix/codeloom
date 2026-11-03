@@ -71,14 +71,23 @@ def read_prompt(prompt: str, paste_dir: Path | None = None) -> tuple[str, dict[s
 
     A multiline paste is shown on the prompt line as [multiline paste] (the
     marker the terminal transcript carries) and — with paste_dir given —
-    saved as byte-exact text to the next free paste-NN.txt under it, with a
-    note of where. What comes back is a pair: the message as the terminal
+    saved as byte-exact text (line endings normalized to \n) to the next free
+    paste-NN.txt under it, with a note of where. What comes back is a pair: the message as the terminal
     shows it, plus the mapping capture() made, which the harness applies
     just before sending so the model still receives the text in full.
     """
     line = input(prompt)
     if not is_terminal():
         return line, {}  # scripted or piped input: no queue, no pastes
+    # A paste's line endings are whatever the clipboard carried, and readline
+    # holds the tty in raw mode for its own reads (with ICRNL cleared), so
+    # unlike canonical input nothing on the way in turns \r into \n. A \r- or
+    # \r\n-separated paste then contains no \n at all: the checks below never
+    # see a multiline paste — no marker is shown, nothing is saved, and the
+    # model receives every pasted line glued into one flat string, which is
+    # the very result this module exists to prevent. No single-line entry ever
+    # legitimately contains \r, so normalizing here can only fix pastes.
+    line = line.replace("\r\n", "\n").replace("\r", "\n")
     if "\n" in line:
         # readline itself got the whole paste (bracketed paste mode) and
         # returned it in one go: there is nothing left in the queue.
@@ -227,8 +236,9 @@ def _save(text: str, paste_dir: Path) -> Path | None:
     """Write the paste to paste_dir/paste-NN.txt with the next free index.
 
     The "x" open mode keeps two harnesses running at once from clobbering the
-    same file, and newline="" writes the bytes with nothing translated, so
-    the file is exactly what was pasted. Failure is never fatal — the caller
+    same file, and newline="" writes the bytes with nothing translated, so the
+    file is exactly what was captured (read_prompt has normalized the pasted
+    line endings to \n by then). Failure is never fatal — the caller
     reports it and the paste has still been captured.
     """
     try:
