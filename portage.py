@@ -78,6 +78,21 @@ def print_commands() -> None:
     print()
 
 
+def thinking_suffix(agent: Agent) -> str:
+    """The prompt extra when the model's thinking is off: ' (thinking off)'.
+
+    Claude does not think at all while agent.show_thinking is False (agent.py
+    only adds the thinking config to the request when it is True), so that flag
+    alone decides. Ollama's thinking is separate server-side state (client.think:
+    on / off / a low-medium-high level), and --hide-thinking merely hides the
+    stream while thinking continues, so there only client.think 'off' counts.
+    The /think-on and /think-off commands set both flags together, so the two
+    views agree whenever a toggle happens.
+    """
+    off = not agent.show_thinking if agent.priced else agent.client.think == "off"
+    return " (thinking off)" if off else ""
+
+
 def read_key(provider: str) -> str:
     key_file, what = KEY_FILES[provider]
     try:
@@ -231,11 +246,14 @@ def main() -> None:
     plan_mode = False
 
     while True:
+        # Rebuilt every iteration so /think-on and /think-off take effect on the
+        # very next prompt.
+        suffix = thinking_suffix(agent)
         try:
             if plan_mode:
-                user_text = input(style.prompt("plan> ", style.BOLD, style.MAGENTA)).strip()
+                user_text = input(style.prompt(f"plan{suffix}> ", style.BOLD, style.MAGENTA)).strip()
             else:
-                user_text = input(style.prompt("you> ", style.BOLD, style.GREEN)).strip()
+                user_text = input(style.prompt(f"you{suffix}> ", style.BOLD, style.GREEN)).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
