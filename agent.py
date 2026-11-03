@@ -25,9 +25,10 @@ WRITE_TOOLS = {"write_file", "edit_file", "append_file"}
 
 SYSTEM_PROMPT = """You are a coding assistant working inside a single project directory.
 
-You can only list directories, read files, and write files, using the tools provided. \
+You can only list directories, read and search file contents, and write files, using the tools provided. \
 You cannot run commands, execute code, run tests, install packages, or access the network. \
-All paths are relative to the project root. When a task would normally require running \
+All paths are relative to the project root. Prefer search to locate text in large files \
+instead of reading them whole. When a task would normally require running \
 something (tests, builds, scripts), make the file changes and tell the user what to run \
 themselves.
 
@@ -44,7 +45,7 @@ ask what they would like instead."""
 # Prepended to a /talk message. The tool list stays the same (changing it would
 # invalidate the prompt cache), so the write tools are also refused at dispatch.
 READ_ONLY_NOTE = (
-    "[Read-only message: answer using list_directory and read_file only. "
+    "[Read-only message: answer using list_directory, read_file, and search only. "
     "Do not write or change any files; write_file is disabled for this message.]\n\n"
 )
 
@@ -52,7 +53,7 @@ READ_ONLY_NOTE = (
 # around the project, but its answer is a plan, not the implementation itself.
 PLAN_NOTE = (
     "[Plan request: reply with a concise implementation plan, not the implementation. First "
-    "look around the project with list_directory and read_file as needed, then answer with: "
+    "look around the project with list_directory, read_file, and search as needed, then answer with: "
     "the goal in one sentence, a short numbered list of steps, which files would be created "
     "or changed, and anything the user would need to run themselves (tests, builds, commands). "
     "Do not write or change any files; write_file is disabled for this message.]\n\n"
@@ -282,7 +283,12 @@ class Agent:
                 if block["type"] != "tool_use":
                     continue
                 tool_input = block.get("input") or {}
-                print(f"  {style.dim('->')} {style.tool_name(block['name'])}({tool_input.get('path', '')})")
+                if block["name"] == "search":
+                    shown_path = tool_input.get("path", ".")
+                    shown = tool_input.get("pattern", "") + (f" in {shown_path}" if shown_path != "." else "")
+                else:
+                    shown = tool_input.get("path", "")
+                print(f"  {style.dim('->')} {style.tool_name(block['name'])}({shown})")
                 try:
                     if self.read_only and block["name"] in WRITE_TOOLS:
                         raise ToolError("writes are disabled: this message is read-only (sent with /talk or /plan)")

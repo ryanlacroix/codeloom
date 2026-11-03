@@ -7,6 +7,7 @@ diff of just the areas that changed.
 """
 
 import codecs
+import re
 from pathlib import Path
 
 import style
@@ -15,6 +16,10 @@ from diff import render_diff
 MAX_READ_BYTES = 1_000_000
 MAX_WRITE_BYTES = 1_000_000
 MAX_LIST_ENTRIES = 500
+MAX_SEARCH_RESULT_CAP = 500     # hard ceiling for search's max_results parameter
+MAX_MATCH_CHARS = 200           # matching-line text kept per search result
+MAX_SEARCH_FILES = 5_000        # files scanned before search stops with a note
+MAX_SEARCH_BYTES = 100_000_000  # bytes scanned before search stops with a note
 
 
 class ToolError(Exception):
@@ -105,6 +110,84 @@ class Workspace:
             f"{encoding}, so only use characters that {encoding} can represent.]"
         )
         return [{"type": "text", "text": note}, {"type": "text", "text": text}]
+
+    def search(self, pattern: str, path: str = ".", ignore_case: bool = False, max_results: int = 50) -> str:
+        """Regex-search file contents without reading files into the conversation.
+
+        Scans files under path (default: the whole project; a single-file path
+        searches just that file) in sorted order, skips binary files (by a
+        null-byte sniff), and reports every matching line as 'relpath:line:
+        first 200 characters' with 1-based line numbers. Stops at max_results
+        (at most 500), or after MAX_SEARCH_FILES files or MAX_SEARCH_BYTES
+        bytes, each with a closing note so the caller can narrow the search.
+        Reading this way does not count as the read_file required before
+        editing a file.
+        """
+        if not isinstance(pattern, str) or not pattern:
+            raise ToolError("pattern must be a non-empty string")
+        if not isinstance(ignore_case, bool):
+            raise ToolError("ignore_case must be boolean")
+        if not isinstance(max_results, int) or isinstance(max_results, bool) or max_results < 1:
+            raise ToolError("max_results must be a positive integer")
+        result_cap = min(max_results, MAX_SEARCH_RESULT_CAP)
+        try:
+            regex = re.compile(pattern, re.IGNORECASE if ignore_case else 0)
+        except re.error as e:
+            raise ToolError(f"invalid pattern: {e}")
+        target = self.resolve(path)
+        if target.is_file():
+            files = [target]
+        elif target.is_dir():
+            # .git/ internals are excluded from the walk; everything else is
+            # searched, with binary files skipped by their content below.
+            files = sorted(
+                entry
+                for entry in target.rglob("*")
+                if entry.is_file() and ".git" not in entry.relative_to(self.root).parts
+            )
+        else:
+            raise ToolError(f"not a file or directory: {path}")
+        matches: list[str] = []
+        notes: list[str] = []
+        skipped = 0
+        scanned_files = 0
+        scanned_bytes = 0
+        for file in files:
+            if len(matches) >= result_cap:
+                break
+            if scanned_files >= MAX_SEARCH_FILES or scanned_bytes >= MAX_SEARCH_BYTES:
+                notes.append(
+                    f"(search stopped after {scanned_files} files and {scanned_bytes:,} bytes; "
+                    "narrow the path to search the rest)"
+                )
+                break
+            try:
+                data = file.read_bytes()
+            except OSError:
+                skipped += 1
+                continue
+            if b"\x00" in data[:8192]:
+                skipped += 1
+                continue
+            scanned_files += 1
+            scanned_bytes += len(data)
+            text, _encoding = self.decode(data)
+            relative = file.relative_to(self.root).as_posix()
+            for line_no, line in enumerate(text.splitlines(), 1):
+                if regex.search(line):
+                    cut = line[:MAX_MATCH_CHARS] + ("..." if len(line) > MAX_MATCH_CHARS else "")
+                    matches.append(f"{relative}:{line_no}: {cut}")
+                    if len(matches) >= result_cap:
+                        break
+        if len(matches) >= result_cap:
+            notes.append(
+                f"(stopped at the {result_cap}-match cap; more matches may exist, so narrow "
+                "the pattern or the path)"
+            )
+        if skipped:
+            notes.append(f"(skipped {skipped} binary or unreadable file{'s' if skipped != 1 else ''})")
+        lines = matches if matches else ["(no matches)"]
+        return "\n".join(lines + notes)
 
     def write_file(self, path: str, content: str) -> str:
         """Create a file, or overwrite one with the complete new contents.

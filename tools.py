@@ -32,6 +32,38 @@ TOOLS = [
         },
     },
     {
+        "name": "search",
+        "description": "Search file contents in the project with a regular expression, without reading "
+        "whole files; each result is 'path:line: text' for a matching line. Binary files are skipped, "
+        "and results are capped: when the cap is reached, narrow the pattern or the path. This does "
+        "not count as the read_file needed before editing a file.",
+        "strict": True,
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Python regular expression matched against each line of each file.",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Directory or single file to search, relative to the project root. "
+                    "Default: the whole project (except .git/).",
+                },
+                "ignore_case": {
+                    "type": "boolean",
+                    "description": "True for case-insensitive matching. Default: false.",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of matching lines to return, at most 500. Default: 50.",
+                },
+            },
+            "required": ["pattern"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "write_file",
         "description": "Create or overwrite a text file inside the project with the given complete "
         "contents. An existing file must be read first, and is saved in its original encoding and "
@@ -103,6 +135,13 @@ def run_tool(workspace: Workspace, name: str, tool_input: dict) -> str | list:
         return workspace.list_directory(tool_input.get("path"))
     if name == "read_file":
         return workspace.read_file(tool_input.get("path"))
+    if name == "search":
+        return workspace.search(
+            tool_input.get("pattern"),
+            path=tool_input.get("path", "."),
+            ignore_case=bool(tool_input.get("ignore_case")),
+            max_results=tool_input.get("max_results", 50),
+        )
     if name == "write_file":
         return workspace.write_file(tool_input.get("path"), tool_input.get("content"))
     if name == "edit_file":
