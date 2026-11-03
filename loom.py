@@ -32,7 +32,6 @@ import stat
 import sys
 from pathlib import Path
 
-import paste
 import splash
 import style
 from agent import Agent
@@ -55,9 +54,8 @@ KEY_FILES = {
 }
 
 # Plans are saved here, under the project root, so they survive restarts and can be
-# read or diffed outside the conversation; pasted multiline text is saved here
-# too, under pastes/. The directory is kept out of git by a .gitignore entry
-# that is added automatically the first time a plan is saved.
+# read or diffed outside the conversation. The directory is kept out of git by a
+# .gitignore entry that is added automatically the first time a plan is saved.
 PLAN_DIR = ".portage-temp"
 PLAN_FILE = "plan.md"
 
@@ -263,27 +261,16 @@ def main() -> None:
     # disabled, and the prompt is "plan>" to make the mode visible.
     plan_mode = False
 
-    # Multiline pastes are saved here, under the same scratch directory the
-    # plans use, which .gitignore already covers.
-    paste_dir = root / PLAN_DIR / paste.PASTES_SUBDIR
-
     while True:
         # Rebuilt every iteration so /think-on and /think-off take effect on the
         # very next prompt.
         suffix = thinking_suffix(agent)
         try:
-            # read_prompt is input(), plus capture of a multiline paste as one
-            # message instead of one message per pasted line: the paste is
-            # redrawn on screen as [multiline paste], saved to paste_dir, and
-            # its text is kept in paste_pending — the commands below are parsed
-            # from what is visible, and paste.expand puts the saved text back
-            # in just before the message is sent.
             if plan_mode:
                 prompt_line = style.prompt(f"plan{suffix}> ", style.BOLD, style.MAGENTA)
             else:
                 prompt_line = style.prompt(f"you{suffix}> ", style.BOLD, style.GREEN)
-            user_text, paste_pending = paste.read_prompt(prompt_line, paste_dir)
-            user_text = user_text.strip()
+            user_text = input(prompt_line).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -380,9 +367,7 @@ def main() -> None:
 
         history_len = len(agent.messages)
         try:
-            # The marker stays with what the user typed; the model gets the
-            # full text of any paste the marker stands for.
-            agent.send(paste.expand(user_text, paste_pending), read_only=read_only, plan=plan)
+            agent.send(user_text, read_only=read_only, plan=plan)
             # Plan state advances only once the turn fully succeeded, so a failed or
             # interrupted turn leaves the previous state in place.
             if plan == "approved":
