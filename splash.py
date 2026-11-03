@@ -1,7 +1,7 @@
 """Startup splash: the "CodeLoom" title art shown when the harness starts.
 
 The art is embedded as a constant (pre-generated, originally saved at
-.portage-temp/splash-text.txt) rather than read from disk, so the splash works
+.loom-temp/splash-text.txt) rather than read from disk, so the splash works
 no matter how or from where the harness is launched. The block is centered
 horizontally in the terminal as a whole (never line-by-line, which would break
 the figure). Nothing is printed when colors are off (NO_COLOR, non-terminal
@@ -14,7 +14,7 @@ import style
 
 # "CodeLoom" in the braille-dots figlet style, kept exactly as generated
 # (leading blank line and trailing whitespace trimmed; see
-# .codeloom-temp/splash-text.txt).
+# .loom-temp/splash-text.txt).
 ART = r""" ⡎⠑ ⢀⡀ ⢀⣸ ⢀⡀ ⡇  ⢀⡀ ⢀⡀ ⣀⣀  ⡠⡠
  ⠣⠔ ⠣⠜ ⠣⠼ ⠣⠭ ⠧⠤ ⠣⠜ ⠣⠜ ⠇⠇⠇"""
 

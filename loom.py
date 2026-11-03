@@ -14,10 +14,11 @@ The model gets exactly six tools, all confined to a single workspace directory:
   - append_file:    add text to the end of a file, or create it; a long file can be
                     written in several chunks, one per model response
 
-There is deliberately no tool for running commands, and no module here ever
-imports subprocess or calls os.system / exec / eval. The model can only read and
-write files inside the workspace; any path that resolves outside it (via "..",
-absolute paths, or symlinks) is rejected.
+There is deliberately no tool for running commands: no module here calls
+os.system / exec / eval, and the sole subprocess in the whole codebase is the
+/paste editor launcher, started by the harness alone and never given model-supplied
+input. The model can only read and write files inside the workspace; any path that
+resolves outside it (via "..", absolute paths, or symlinks) is rejected.
 
 Auth: put your Claude access token in key.txt, or your Ollama API key in ollama_key.txt,
 next to these scripts (sent as a Bearer token). The model is never allowed to read or write
@@ -28,7 +29,9 @@ Uses only the Python standard library; the API is called directly over HTTPS.
 
 import argparse
 import codecs
+import os
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -56,12 +59,19 @@ KEY_FILES = {
 # Plans are saved here, under the project root, so they survive restarts and can be
 # read or diffed outside the conversation. The directory is kept out of git by a
 # .gitignore entry that is added automatically the first time a plan is saved.
-PLAN_DIR = ".portage-temp"
+PLAN_DIR = ".loom-temp"
 PLAN_FILE = "plan.md"
+
+# The /paste command creates this scratch file under PLAN_DIR and opens it in the
+# user's default text editor; its contents are quoted in front of the next message
+# submitted to the model. The path is also given to the Workspace as blocked, so
+# the model can neither read nor write the paste buffer.
+PASTE_FILE = "paste.txt"
 
 # Slash commands typed at the "you>" prompt; /help lists these.
 COMMANDS = [
     ("/help", "show this list of commands"),
+    ("/paste", "create .loom-temp/paste.txt, open it in your text editor, prepend its contents to your next message"),
     ("/think-on", "turn thinking on for all later messages"),
     ("/think-off", "turn thinking off for all later messages"),
     ("/model [name]", "list the models, or switch to <name> for later messages"),
@@ -129,7 +139,7 @@ def make_client(provider: str, think: str | None) -> Client | OllamaClient:
 
 
 def save_plan(root: Path, agent: Agent) -> None:
-    """Save the newest plan reply to .portage-temp/plan.md.
+    """Save the newest plan reply to .loom-temp/plan.md.
 
     Trusted harness code writes this directly (not through the model's sandboxed
     tools), so saving needs no approval, and the directory is created if missing.
@@ -151,7 +161,7 @@ def save_plan(root: Path, agent: Agent) -> None:
 
 
 def ensure_gitignored(root: Path) -> None:
-    """Add .portage-temp/ to .gitignore unless a spelling of it is already listed.
+    """Add .loom-temp/ to .gitignore unless a spelling of it is already listed.
 
     The file is created if it does not exist. Existing bytes are kept as they are:
     the entry is appended, so no re-encoding of the rest of the file can corrupt it.
@@ -174,6 +184,43 @@ def ensure_gitignored(root: Path) -> None:
         print(style.warning(f"  [could not update {gitignore}: {e}]"))
         return
     print(style.dim(f"  [.gitignore now ignores {PLAN_DIR}/]"))
+
+
+# Handles for editors launched by open_in_editor, kept here so they are never
+# garbage-collected while the editor still runs (a finalised Popen can emit a
+# "subprocess ... is still running" warning). Nothing ever waits on these.
+_EDITOR_PROCS = set()
+
+
+def open_in_editor(path: Path) -> bool:
+    """Open a file with the user's default text-file editor; True if launched.
+
+    The one place the harness ever starts a subprocess: a fixed launcher per
+    platform plus the path itself as a single argument, so there is no command
+    line for anything to be injected into. The call frees the terminal at once
+    and never waits for the editor: os.startfile is async by design on Windows,
+    and on POSIX Popen hands the editor its own session (no controlling terminal)
+    and DEVNULL std streams, so even an xdg-open that blocks until the app exits,
+    or a chatty editor inheriting stdio, can neither print into nor hold the
+    harness's terminal, and the prompt is usable immediately. With no parent to
+    wait for it, the editor also survives the harness exiting.
+    """
+    detached = dict(
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True
+    )
+    try:
+        if sys.platform == "win32":
+            os.startfile(path)
+        elif sys.platform == "darwin":
+            _EDITOR_PROCS.add(subprocess.Popen(["open", str(path)], **detached))
+        else:
+            _EDITOR_PROCS.add(subprocess.Popen(["xdg-open", str(path)], **detached))
+    except (OSError, AttributeError) as e:
+        # AttributeError: os.startfile does not exist off Windows; OSError covers
+        # a missing xdg-open/open (FileNotFoundError is an OSError subclass).
+        print(style.warning(f"  [could not open an editor for {path}: {e}]"))
+        return False
+    return True
 
 
 def main() -> None:
@@ -237,7 +284,15 @@ def main() -> None:
         sys.exit(f"Unknown encoding: {args.fallback_encoding}")
 
     workspace = Workspace(
-        root, auto_approve_writes=args.yes, fallback_encoding=args.fallback_encoding, blocked=tuple(path for path, _ in KEY_FILES.values())
+        root,
+        auto_approve_writes=args.yes,
+        fallback_encoding=args.fallback_encoding,
+        # The paste buffer is off-limits to the model: it can neither read the
+        # pending paste out of .loom-temp/paste.txt nor plant text there to be
+        # quoted into a later "user" message. workspace.py resolves every blocked
+        # entry with Path.resolve(), which succeeds for a file that does not exist
+        # yet, so this holds even before the first /paste creates the file.
+        blocked=(root / PLAN_DIR / PASTE_FILE, *(path for path, _ in KEY_FILES.values())),
     )
     agent = Agent(
         make_client(args.provider, args.think), workspace, model=args.model, show_thinking=not args.hide_thinking
@@ -261,6 +316,11 @@ def main() -> None:
     # disabled, and the prompt is "plan>" to make the mode visible.
     plan_mode = False
 
+    # Set by /paste: the next message submitted to the model gets the contents of
+    # .loom-temp/paste.txt quoted in front of it, and the flag is then consumed.
+    # Commands that send nothing to the model leave it set; /reset clears it.
+    paste_pending = False
+
     while True:
         # Rebuilt every iteration so /think-on and /think-off take effect on the
         # very next prompt.
@@ -281,6 +341,7 @@ def main() -> None:
         if user_text == "/reset":
             agent.messages = []
             plan_mode = False
+            paste_pending = False
             if agent.priced:
                 print(style.dim(f"  [conversation cleared; ~${agent.session_usage.cost:.4f} spent this session]"))
             else:
@@ -318,6 +379,27 @@ def main() -> None:
             print(style.dim(f"  [model set to {name}]"))
             if name not in OLLAMA_MODELS:
                 print(style.dim("  [not in the /model list; Ollama Cloud accepts any model name]"))
+            continue
+
+        # /paste creates a fresh empty .loom-temp/paste.txt and opens it in the
+        # user's default editor. Whenever the next message is actually submitted to
+        # the model, its saved contents are quoted in front of the prompt and the
+        # pending state is consumed (the hook sits just before agent.send). Like the
+        # commands above, it works while a plan is open and sends nothing to the
+        # model; anything typed after the command word is ignored. If a paste is
+        # already pending the file is only reopened, so an unsent draft is kept.
+        if user_text == "/paste" or user_text.startswith(("/paste ", "/paste\t")):
+            paste_path = root / PLAN_DIR / PASTE_FILE
+            try:
+                paste_path.parent.mkdir(parents=True, exist_ok=True)
+                if not paste_pending:
+                    paste_path.write_bytes(b"")  # a fresh buffer for each /paste
+            except OSError as e:
+                print(style.warning(f"  [could not create {PLAN_DIR}/{PASTE_FILE}: {e}]"))
+                continue
+            open_in_editor(paste_path)
+            paste_pending = True
+            print(style.dim(f"  [paste file open: {PLAN_DIR}/{PASTE_FILE}; what you save there is pasted in front of your next message]"))
             continue
 
         # Planning state machine. plan tells Agent.send what kind of message this is:
@@ -364,6 +446,27 @@ def main() -> None:
             if not args.talk:
                 # With --talk the read-only state was already announced at startup.
                 print(style.dim("  [read-only: no files will be changed]"))
+
+        # The pending paste is quoted in front of the prompt at the last moment,
+        # after /talk stripping, so whatever was last saved in the editor is what
+        # the model sees. This counts as the submission for /plan, plan revisions,
+        # /ok and /talk too, and the flag is consumed before sending whatever the
+        # turn's outcome, so a failed turn does not re-paste on the next attempt.
+        if paste_pending:
+            paste_pending = False
+            try:
+                # The editor may save in a non-UTF-8 encoding; replace any bad
+                # bytes rather than losing the paste. .strip() drops editor-added
+                # leading/trailing whitespace and CRLF is already normalised.
+                paste_text = (root / PLAN_DIR / PASTE_FILE).read_text(encoding="utf-8", errors="replace").strip()
+            except OSError as e:
+                print(style.warning(f"  [could not read {PLAN_DIR}/{PASTE_FILE}: {e}]"))
+            else:
+                if paste_text:
+                    user_text = f"The user pasted this text:\n\n{paste_text}\n\n{user_text}"
+                    print(style.dim(f"  [pasted {PLAN_DIR}/{PASTE_FILE} in front of your message]"))
+                else:
+                    print(style.dim(f"  [{PLAN_DIR}/{PASTE_FILE} was empty; nothing pasted]"))
 
         history_len = len(agent.messages)
         try:
