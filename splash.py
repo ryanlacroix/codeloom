@@ -1,4 +1,4 @@
-"""Startup splash: the "Portage" title art shown when the harness starts.
+"""Startup splash: the "CodeLoom" title art shown when the harness starts.
 
 The art is embedded as a constant (pre-generated, originally saved at
 .portage-temp/splash-text.txt) rather than read from disk, so the splash works
@@ -12,16 +12,11 @@ import shutil
 
 import style
 
-# "PORTAGE" in the block-shading (▀▄█) figlet style, kept exactly as generated
+# "CodeLoom" in the braille-dots figlet style, kept exactly as generated
 # (leading blank line and trailing whitespace trimmed; see
-# .portage-temp/splash-text.txt).
-ART = r"""▄▄▄▄▄▄▄                                        ▄
-███▀▀███▄              ██                    ▀▀█▀▀
-███▄▄███▀ ▄███▄ ████▄ ▀██▀▀ ▀▀█▄ ▄████ ▄█▀█▄
-███▀▀▀▀   ██ ██ ██ ▀▀  ██  ▄█▀██ ██ ██ ██▄█▀
-███       ▀███▀ ██     ██  ▀█▄██ ▀████ ▀█▄▄▄
-                                    ██
-                                  ▀▀▀"""
+# .codeloom-temp/splash-text.txt).
+ART = r""" ⡎⠑ ⢀⡀ ⢀⣸ ⢀⡀ ⡇  ⢀⡀ ⢀⡀ ⣀⣀  ⡠⡠
+ ⠣⠔ ⠣⠜ ⠣⠼ ⠣⠭ ⠧⠤ ⠣⠜ ⠣⠜ ⠇⠇⠇"""
 
 
 def print_splash() -> None:
@@ -30,7 +25,7 @@ def print_splash() -> None:
     if not style.colors_enabled():
         return
     lines = ART.splitlines()
-    # The block glyphs (▀▄█) are single-cell in terminals, so len() gives the
+    # The braille dot glyphs are single-cell in terminals, so len() gives the
     # display width. get_terminal_size() falls back to COLUMNS or 80 when
     # stdout is not a terminal; max(0, ...) covers widths narrower than the art.
     art_width = max(len(line) for line in lines)

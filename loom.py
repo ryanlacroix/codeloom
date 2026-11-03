@@ -233,6 +233,7 @@ def main() -> None:
     print(f"{style.bold('Model:')}     {style.model_label(args.model)} {style.dim(f'({args.provider})')}")
     if args.think:
         print(f"{style.bold('Thinking:')}  {args.think} {style.dim('(toggle with /think-on, /think-off)')}")
+    print()
     print(style.dim("The model can read and write files here only. No commands can be run."))
     if args.talk:
         print(style.warning("Read-only mode: every message behaves like /talk; no files can be changed."))
