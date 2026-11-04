@@ -56,13 +56,14 @@ KEY_FILES = {
     "ollama": (SCRIPT_DIR.parent / "ollama_key.txt", "Ollama API key"),
 }
 
-# Plans are saved here, under the project root, so they survive restarts and can be
-# read or diffed outside the conversation. The directory is kept out of git by a
-# .gitignore entry that is added automatically the first time a plan is saved.
-PLAN_DIR = ".loom-temp"
+# Plans are saved here, in the harness's own temp directory next to loom.py, so
+# they survive restarts and can be read outside the conversation while the project
+# the model works on stays untouched. The directory sits outside the workspace,
+# so the model never sees it, and no project's .gitignore needs an entry.
+TEMP_DIR = SCRIPT_DIR / ".loom-temp"
 PLAN_FILE = "plan.md"
 
-# The /paste command creates this scratch file under PLAN_DIR and opens it in the
+# The /paste command creates this scratch file under TEMP_DIR and opens it in the
 # user's default text editor; its contents are quoted in front of the next message
 # submitted to the model. The path is also given to the Workspace as blocked, so
 # the model can neither read nor write the paste buffer.
@@ -71,9 +72,9 @@ PASTE_FILE = "paste.txt"
 # Slash commands typed at the "you>" prompt; /help lists these.
 COMMANDS = [
     ("/help", "show this list of commands"),
-    ("/paste", "create .loom-temp/paste.txt, open it in your text editor, prepend its contents to your next message"),
-    ("/think-on", "turn thinking on for all later messages"),
-    ("/think-off", "turn thinking off for all later messages"),
+    ("/paste", "paste long text into an external editor"),
+    ("/thinking-on", "turn thinking on for all later messages"),
+    ("/thinking-off", "turn thinking off for all later messages"),
     ("/model [name]", "list the models, or switch to <name> for later messages"),
     ("/talk <question>", "ask the model something without any files being changed"),
     ("/plan <task>", "propose an implementation plan for the task, changing no files"),
@@ -111,7 +112,7 @@ def thinking_suffix(agent: Agent) -> str:
     alone decides. Ollama's thinking is separate server-side state (client.think:
     on / off / a low-medium-high level), and --hide-thinking merely hides the
     stream while thinking continues, so there only client.think 'off' counts.
-    The /think-on and /think-off commands set both flags together, so the two
+    The /thinking-on and /thinking-off commands set both flags together, so the two
     views agree whenever a toggle happens.
     """
     off = not agent.show_thinking if agent.priced else agent.client.think == "off"
@@ -138,12 +139,13 @@ def make_client(provider: str, think: str | None) -> Client | OllamaClient:
     return OllamaClient(key, think=think) if provider == "ollama" else Client(key)
 
 
-def save_plan(root: Path, agent: Agent) -> None:
-    """Save the newest plan reply to .loom-temp/plan.md.
+def save_plan(agent: Agent) -> None:
+    """Save the newest plan reply to the harness's .loom-temp/plan.md.
 
     Trusted harness code writes this directly (not through the model's sandboxed
     tools), so saving needs no approval, and the directory is created if missing.
-    Failures are reported but never fatal.
+    The file lives next to loom.py, outside the workspace, so the project the
+    model works on is left untouched. Failures are reported but never fatal.
     """
     text = agent.last_reply_text()
     if not text.strip():
@@ -151,39 +153,12 @@ def save_plan(root: Path, agent: Agent) -> None:
         return
     text = text if text.endswith("\n") else text + "\n"
     try:
-        (root / PLAN_DIR).mkdir(parents=True, exist_ok=True)
-        (root / PLAN_DIR / PLAN_FILE).write_text(text, encoding="utf-8", newline="\n")
+        TEMP_DIR.mkdir(parents=True, exist_ok=True)
+        (TEMP_DIR / PLAN_FILE).write_text(text, encoding="utf-8", newline="\n")
     except OSError as e:
-        print(style.warning(f"  [could not save the plan to {PLAN_DIR}/{PLAN_FILE}: {e}]"))
+        print(style.warning(f"  [could not save the plan to {TEMP_DIR / PLAN_FILE}: {e}]"))
         return
-    print(style.dim(f"  [plan saved to {PLAN_DIR}/{PLAN_FILE}]"))
-    ensure_gitignored(root)
-
-
-def ensure_gitignored(root: Path) -> None:
-    """Add .loom-temp/ to .gitignore unless a spelling of it is already listed.
-
-    The file is created if it does not exist. Existing bytes are kept as they are:
-    the entry is appended, so no re-encoding of the rest of the file can corrupt it.
-    """
-    gitignore = root / ".gitignore"
-    try:
-        data = gitignore.read_bytes()
-    except FileNotFoundError:
-        data = b""
-    except OSError as e:
-        print(style.warning(f"  [could not read {gitignore}: {e}]"))
-        return
-    # Any spelling counts as present: with or without a leading or trailing slash.
-    if any(line.strip().strip("/") == PLAN_DIR for line in data.decode("utf-8", "replace").splitlines()):
-        return
-    try:
-        with gitignore.open("ab") as f:
-            f.write((b"" if not data or data.endswith(b"\n") else b"\n") + f"{PLAN_DIR}/\n".encode("utf-8"))
-    except OSError as e:
-        print(style.warning(f"  [could not update {gitignore}: {e}]"))
-        return
-    print(style.dim(f"  [.gitignore now ignores {PLAN_DIR}/]"))
+    print(style.dim(f"  [plan saved to {TEMP_DIR / PLAN_FILE}]"))
 
 
 # Handles for editors launched by open_in_editor, kept here so they are never
@@ -288,11 +263,15 @@ def main() -> None:
         auto_approve_writes=args.yes,
         fallback_encoding=args.fallback_encoding,
         # The paste buffer is off-limits to the model: it can neither read the
-        # pending paste out of .loom-temp/paste.txt nor plant text there to be
-        # quoted into a later "user" message. workspace.py resolves every blocked
-        # entry with Path.resolve(), which succeeds for a file that does not exist
-        # yet, so this holds even before the first /paste creates the file.
-        blocked=(root / PLAN_DIR / PASTE_FILE, *(path for path, _ in KEY_FILES.values())),
+        # pending paste out of the harness's .loom-temp/paste.txt nor plant text
+        # there to be quoted into a later "user" message. The buffer lives outside
+        # the workspace, so containment already keeps it out of reach; the blocked
+        # entry stays as defense in depth for a workspace that contains the
+        # harness folder itself (e.g. this repo used as a project). workspace.py
+        # resolves every blocked entry with Path.resolve(), which succeeds for a
+        # file that does not exist yet, so this holds even before the first /paste
+        # creates the file.
+        blocked=(TEMP_DIR / PASTE_FILE, *(path for path, _ in KEY_FILES.values())),
     )
     agent = Agent(
         make_client(args.provider, args.think), workspace, model=args.model, show_thinking=not args.hide_thinking
@@ -302,7 +281,7 @@ def main() -> None:
     print(f"{style.bold('Workspace:')} {workspace.root}")
     print(f"{style.bold('Model:')}     {style.model_label(args.model)} {style.dim(f'({args.provider})')}")
     if args.think:
-        print(f"{style.bold('Thinking:')}  {args.think} {style.dim('(toggle with /think-on, /think-off)')}")
+        print(f"{style.bold('Thinking:')}  {args.think} {style.dim('(toggle with /thinking-on, /thinking-off)')}")
     print()
     print(style.dim("The model can read and write files here only. No commands can be run."))
     if args.talk:
@@ -317,12 +296,13 @@ def main() -> None:
     plan_mode = False
 
     # Set by /paste: the next message submitted to the model gets the contents of
-    # .loom-temp/paste.txt quoted in front of it, and the flag is then consumed.
-    # Commands that send nothing to the model leave it set; /reset clears it.
+    # the harness's .loom-temp/paste.txt quoted in front of it, and the flag is
+    # then consumed. Commands that send nothing to the model leave it set; /reset
+    # clears it.
     paste_pending = False
 
     while True:
-        # Rebuilt every iteration so /think-on and /think-off take effect on the
+        # Rebuilt every iteration so /thinking-on and /thinking-off take effect on the
         # very next prompt.
         suffix = thinking_suffix(agent)
         try:
@@ -350,13 +330,13 @@ def main() -> None:
         if user_text == "/help":
             print_commands()
             continue
-        # /think-on and /think-off toggle model thinking for all later messages, in
+        # /thinking-on and /thinking-off toggle model thinking for all later messages, in
         # either prompt (in plan mode the setting is applied and the `plan>` prompt
         # returns with its pending plan intact). Anything typed after the command
         # word is ignored, and nothing is sent to the model. Handled here, before
         # the planning state machine, like /reset and /help.
-        if user_text.startswith("/think-on") or user_text.startswith("/think-off"):
-            on = user_text.startswith("/think-on")
+        if user_text.startswith("/thinking-on") or user_text.startswith("/thinking-off"):
+            on = user_text.startswith("/thinking-on")
             agent.show_thinking = on
             if not agent.priced:
                 # Ollama: "off" stops thinking server-side as well as hiding it, and
@@ -381,25 +361,26 @@ def main() -> None:
                 print(style.dim("  [not in the /model list; Ollama Cloud accepts any model name]"))
             continue
 
-        # /paste creates a fresh empty .loom-temp/paste.txt and opens it in the
-        # user's default editor. Whenever the next message is actually submitted to
-        # the model, its saved contents are quoted in front of the prompt and the
-        # pending state is consumed (the hook sits just before agent.send). Like the
-        # commands above, it works while a plan is open and sends nothing to the
-        # model; anything typed after the command word is ignored. If a paste is
-        # already pending the file is only reopened, so an unsent draft is kept.
+        # /paste creates a fresh empty paste buffer in the harness's temp folder
+        # (next to loom.py, outside the workspace) and opens it in the user's
+        # default editor. Whenever the next message is actually submitted to the
+        # model, its saved contents are quoted in front of the prompt and the
+        # pending state is consumed (the hook sits just before agent.send). Like
+        # the commands above, it works while a plan is open and sends nothing to
+        # the model; anything typed after the command word is ignored. If a paste
+        # is already pending the file is only reopened, so an unsent draft is kept.
         if user_text == "/paste" or user_text.startswith(("/paste ", "/paste\t")):
-            paste_path = root / PLAN_DIR / PASTE_FILE
+            paste_path = TEMP_DIR / PASTE_FILE
             try:
                 paste_path.parent.mkdir(parents=True, exist_ok=True)
                 if not paste_pending:
                     paste_path.write_bytes(b"")  # a fresh buffer for each /paste
             except OSError as e:
-                print(style.warning(f"  [could not create {PLAN_DIR}/{PASTE_FILE}: {e}]"))
+                print(style.warning(f"  [could not create {paste_path}: {e}]"))
                 continue
             open_in_editor(paste_path)
             paste_pending = True
-            print(style.dim(f"  [paste file open: {PLAN_DIR}/{PASTE_FILE}; what you save there is pasted in front of your next message]"))
+            print(style.dim(f"  [paste file open: {paste_path}; what you save there is pasted in front of your next message]"))
             continue
 
         # Planning state machine. plan tells Agent.send what kind of message this is:
@@ -458,15 +439,15 @@ def main() -> None:
                 # The editor may save in a non-UTF-8 encoding; replace any bad
                 # bytes rather than losing the paste. .strip() drops editor-added
                 # leading/trailing whitespace and CRLF is already normalised.
-                paste_text = (root / PLAN_DIR / PASTE_FILE).read_text(encoding="utf-8", errors="replace").strip()
+                paste_text = (TEMP_DIR / PASTE_FILE).read_text(encoding="utf-8", errors="replace").strip()
             except OSError as e:
-                print(style.warning(f"  [could not read {PLAN_DIR}/{PASTE_FILE}: {e}]"))
+                print(style.warning(f"  [could not read {TEMP_DIR / PASTE_FILE}: {e}]"))
             else:
                 if paste_text:
                     user_text = f"The user pasted this text:\n\n{paste_text}\n\n{user_text}"
-                    print(style.dim(f"  [pasted {PLAN_DIR}/{PASTE_FILE} in front of your message]"))
+                    print(style.dim(f"  [pasted {TEMP_DIR / PASTE_FILE} in front of your message]"))
                 else:
-                    print(style.dim(f"  [{PLAN_DIR}/{PASTE_FILE} was empty; nothing pasted]"))
+                    print(style.dim(f"  [{TEMP_DIR / PASTE_FILE} was empty; nothing pasted]"))
 
         history_len = len(agent.messages)
         try:
@@ -477,7 +458,7 @@ def main() -> None:
                 plan_mode = False
             elif plan in ("start", "update"):
                 plan_mode = True
-                save_plan(root, agent)
+                save_plan(agent)
                 print(style.dim("  [/ok to approve and implement the plan; anything else revises it]"))
         except KeyboardInterrupt:
             print("\n" + style.warning("  [interrupted]"))
