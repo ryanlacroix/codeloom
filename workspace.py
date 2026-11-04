@@ -3,7 +3,11 @@
 Also handles text encodings (UTF-8, or a fallback such as cp1252) and line
 endings, so files are written back in the format they were read in. Every
 write (overwrite, edit, append) is confirmed with the user, showing a coloured
-diff of just the areas that changed.
+diff of just the areas that changed; a write to a file that looks executable by
+convention (a build or test entry file) carries an extra warning. Nothing
+inside a protected directory such as .git — whose config and hooks are a
+command-execution vector — can be read or written, and search never follows a
+symlink, so nothing outside the workspace can be reached through the walk.
 """
 
 import codecs
@@ -21,6 +25,23 @@ MAX_MATCH_CHARS = 200           # matching-line text kept per search result
 MAX_SEARCH_FILES = 5_000        # files scanned before search stops with a note
 MAX_SEARCH_BYTES = 100_000_000  # bytes scanned before search stops with a note
 
+# Writes to files that look executable by convention get an extra warning line in
+# the confirmation prompt: the file may run when the user next builds or tests.
+# A deliberately tiny tripwire, not an inventory of runnable files — anything the
+# user runs is their own decision, made while reading the diff it points at.
+EXEC_RISK_NAMES = (
+    "Makefile",
+    "conftest.py",
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "package.json",
+    "requirements.txt",
+    "Pipfile",
+    "Cargo.toml",
+)
+EXEC_RISK_PARTS = ("__pycache__", "venv", ".venv", "node_modules")
+
 
 class ToolError(Exception):
     """An error reported back to Claude as a failed tool result."""
@@ -35,15 +56,43 @@ class Workspace:
         auto_approve_writes: bool = False,
         fallback_encoding: str = "cp1252",
         blocked: tuple[Path, ...] = (),
+        protected_parts: tuple[str, ...] = (".git",),
+        exec_risk_names: tuple[str, ...] = EXEC_RISK_NAMES,
+        exec_risk_parts: tuple[str, ...] = EXEC_RISK_PARTS,
     ):
         self.root = root.resolve()
         self.auto_approve_writes = auto_approve_writes
         self.fallback_encoding = fallback_encoding
         # Files Claude may never read or write, even inside the workspace (e.g. the key file).
         self.blocked = {p.resolve() for p in blocked}
+        # Path components nothing may sit in or under, compared case-insensitively so a
+        # Windows '.GIT' checkout is covered: .git's config and hooks are a
+        # command-execution vector if written, so the whole directory is off limits.
+        self.protected_parts = frozenset(part.lower() for part in protected_parts)
+        # Filenames, and parent directory components, whose writes carry the extra
+        # confirmation warning (see EXEC_RISK_NAMES / EXEC_RISK_PARTS above).
+        self.exec_risk_names = frozenset(name.lower() for name in exec_risk_names)
+        self.exec_risk_parts = frozenset(part.lower() for part in exec_risk_parts)
         # Encoding and line ending of each file Claude has read or written,
         # so writes can be saved back in the same format.
         self.formats: dict[Path, tuple[str, str]] = {}
+
+    def _denial(self, resolved: Path) -> str | None:
+        """Why a resolved path may not be touched, or None when it may be.
+
+        The one access rule, shared by resolve() (which turns the reason into a
+        ToolError naming the path the model asked for) and search's directory
+        walk (which silently skips what it refuses), so the two can never drift
+        apart: the path must be the workspace root or under it, not one of the
+        blocked files, and not inside a protected directory such as .git.
+        """
+        if resolved != self.root and self.root not in resolved.parents:
+            return "outside the project directory"
+        if resolved in self.blocked:
+            return "a protected file"
+        if any(part.lower() in self.protected_parts for part in resolved.relative_to(self.root).parts):
+            return "inside a protected directory (git config and hooks are a command-execution vector)"
+        return None
 
     def resolve(self, rel_path: str) -> Path:
         if not isinstance(rel_path, str) or not rel_path.strip():
@@ -53,10 +102,9 @@ class Workspace:
         # resolve() follows symlinks and collapses "..", so the containment
         # check below sees where the path really points.
         target = (self.root / rel_path).resolve()
-        if target != self.root and self.root not in target.parents:
-            raise ToolError(f"access denied: '{rel_path}' is outside the project directory")
-        if target in self.blocked:
-            raise ToolError(f"access denied: '{rel_path}' is a protected file")
+        reason = self._denial(target)
+        if reason:
+            raise ToolError(f"access denied: '{rel_path}' is {reason}")
         return target
 
     def display(self, path: Path) -> str:
@@ -188,15 +236,36 @@ class Workspace:
             return blocks
         return page or "(empty file)"
 
+    def _walkable(self, entry: Path) -> bool:
+        """Whether search may read one entry from its directory walk.
+
+        Symlinks are never followed, so a link pointing outside the workspace
+        cannot be read through the walk (resolve() already refuses the same
+        link when it is named directly), and every entry is re-checked with the
+        same rule as resolve() — containment, blocked files, protected
+        directories — since the walk finds paths itself rather than being
+        handed them. The protected-parts filter repeats _denial's check on
+        purpose: belt and braces for the one directory whose contents must
+        never be searched. Refused entries are skipped silently; binary and
+        unreadable files are the only ones a note mentions, below.
+        """
+        if entry.is_symlink() or not entry.is_file():
+            return False
+        if any(part.lower() in self.protected_parts for part in entry.relative_to(self.root).parts):
+            return False
+        return self._denial(entry.resolve()) is None
+
     def search(self, pattern: str, path: str = ".", ignore_case: bool = False, max_results: int = 50) -> str:
         """Regex-search file contents without reading files into the conversation.
 
         Scans files under path (default: the whole project; a single-file path
         searches just that file) in sorted order, skips binary files (by a
-        null-byte sniff), and reports every matching line as 'relpath:line:
-        first 200 characters' with 1-based line numbers. Stops at max_results
-        (at most 500), or after MAX_SEARCH_FILES files or MAX_SEARCH_BYTES
-        bytes, each with a closing note so the caller can narrow the search.
+        null-byte sniff) and symlinks (a link is never followed, so nothing
+        outside the workspace can be read through the walk), and reports every
+        matching line as 'relpath:line: first 200 characters' with 1-based
+        line numbers. Stops at max_results (at most 500), or after
+        MAX_SEARCH_FILES files or MAX_SEARCH_BYTES bytes, each with a closing
+        note so the caller can narrow the search.
         Reading this way does not count as the read_file required before
         editing a file.
         """
@@ -215,13 +284,10 @@ class Workspace:
         if target.is_file():
             files = [target]
         elif target.is_dir():
-            # .git/ internals are excluded from the walk; everything else is
-            # searched, with binary files skipped by their content below.
-            files = sorted(
-                entry
-                for entry in target.rglob("*")
-                if entry.is_file() and ".git" not in entry.relative_to(self.root).parts
-            )
+            # Every walked entry passes _walkable: the same rule resolve()
+            # applies (containment, blocked files, .git), plus never
+            # following symlinks. Binary files are skipped by content below.
+            files = sorted(entry for entry in target.rglob("*") if self._walkable(entry))
         else:
             raise ToolError(f"not a file or directory: {path}")
         matches: list[str] = []
@@ -379,6 +445,23 @@ class Workspace:
             text = self.decode(current)[0]
         return text.replace("\r\n", "\n")
 
+    def exec_risk(self, target: Path) -> str | None:
+        """The confirmation warning for a write target that may be executed by
+        the user later, or None for an ordinary file.
+
+        Matches by filename (Makefile, conftest.py, pyproject.toml, ...) or by
+        any parent directory component (__pycache__, venv, .venv, node_modules),
+        case-insensitively. The list is deliberately tiny: a tripwire to make
+        the one human control — reading the diff — harder to sleep through, not
+        an inventory of every file a build could run.
+        """
+        parts = [part.lower() for part in target.relative_to(self.root).parts]
+        if (parts and parts[-1] in self.exec_risk_names) or any(
+            part in self.exec_risk_parts for part in parts[:-1]
+        ):
+            return "note: this file may be executed when you run builds or tests — review the diff carefully"
+        return None
+
     def _finish_write(
         self,
         target: Path,
@@ -415,7 +498,9 @@ class Workspace:
         else:
             changes = "no line changes"
         details = f"{changes}, {len(data)} bytes, {encoding}" + (", CRLF" if newline == "\r\n" else "")
-        if not self.confirm(f"Model wants to {action} {self.display(target)} ({details}).", diff_lines):
+        if not self.confirm(
+            f"Model wants to {action} {self.display(target)} ({details}).", diff_lines, self.exec_risk(target)
+        ):
             raise ToolError("the user declined this write")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
@@ -423,16 +508,23 @@ class Workspace:
         print(f"  {style.success('✓')} {verb} {self.display(target)} ({details})")
         return f"wrote {len(data)} bytes to {self.display(target)}, relative to the project root ({encoding})"
 
-    def confirm(self, message: str, diff_lines: list[str]) -> bool:
+    def confirm(self, message: str, diff_lines: list[str], risk_note: str | None = None) -> bool:
         """Ask before writing, showing a coloured diff of the changed areas.
 
         diff_lines is the pre-rendered output of diff.render_diff; an empty
         list means nothing changes at line level (e.g. a new empty file).
+        risk_note, when set, is a second yellow line under the question,
+        flagging a write to a file that may be executed later (a build or test
+        entry file): the diff it sits above is the user's one chance to check it.
         """
         if self.auto_approve_writes:
             print(f"  {style.dim('[auto-approved]')} {message}")
+            if risk_note:
+                print(f"  {style.warning(risk_note)}")
             return True
         print(f"\n  {style.paint(message, style.BOLD, style.YELLOW)}")
+        if risk_note:
+            print(f"  {style.warning(risk_note)}")
         for line in diff_lines:
             print(f"  {style.dim('|')} {line}")
         # Like every prompt the user types at, the question is preceded by a blank line.

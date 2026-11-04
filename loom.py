@@ -18,7 +18,10 @@ There is deliberately no tool for running commands: no module here calls
 os.system / exec / eval, and the sole subprocess in the whole codebase is the
 /paste editor launcher, started by the harness alone and never given model-supplied
 input. The model can only read and write files inside the workspace; any path that
-resolves outside it (via "..", absolute paths, or symlinks) is rejected.
+resolves outside it (via "..", absolute paths, or symlinks) is rejected. The .git
+directory is off limits too — its config and hooks are a command-execution vector —
+and search never follows symlinks or reads blocked or protected files, so the walk
+cannot reach anything outside the workspace either.
 
 Auth: put your Claude access token in key.txt, or your Ollama API key in ollama_key.txt,
 next to these scripts (sent as a Bearer token). The model is never allowed to read or write
@@ -202,7 +205,12 @@ def main() -> None:
     style.clear_screen()
     parser = argparse.ArgumentParser(description="Locked-down file-only coding agent for Claude or Ollama Cloud.")
     parser.add_argument("dir", help="project directory the model may access (required)")
-    parser.add_argument("--yes", action="store_true", help="approve file writes without asking")
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="approve file writes without asking; you lose the diff review that checks "
+        "writes to files you may later execute",
+    )
     parser.add_argument(
         "--talk",
         action="store_true",
@@ -281,7 +289,7 @@ def main() -> None:
     if args.think:
         print(f"{style.bold('Thinking:')}  {args.think} {style.dim('(toggle with /thinking-on, /thinking-off)')}")
     print()
-    print(style.dim("The model can read and write files here only. No commands can be run."))
+    print(style.dim("The model can read and write files here only. No commands can be run, and .git is protected."))
     if args.talk:
         print(style.warning("Read-only mode: every message behaves like /talk; no files can be changed."))
     else:

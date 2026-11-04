@@ -27,6 +27,8 @@ SYSTEM_PROMPT = """You are a coding assistant working inside a single project di
 
 You can only list directories, read and search file contents, and write files, using the tools provided. \
 You cannot run commands, execute code, run tests, install packages, or access the network. \
+The .git directory is protected: no tool can read or write anything inside it, so never \
+propose changes there. \
 All paths are relative to the project root. Prefer search to locate text in large files \
 instead of reading them whole, and page through very large files with read_file offset and \
 limit, following the continuation notes. When a task would normally require running \

@@ -46,7 +46,8 @@ TOOLS = [
     {
         "name": "search",
         "description": "Search file contents in the project with a regular expression, without reading "
-        "whole files; each result is 'path:line: text' for a matching line. Binary files are skipped, "
+        "whole files; each result is 'path:line: text' for a matching line. Binary and symlinked "
+        "files are skipped in directory searches, protected paths such as .git are never searched, "
         "and results are capped: when the cap is reached, narrow the pattern or the path. This does "
         "not count as the read_file needed before editing a file.",
         "strict": True,
