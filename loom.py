@@ -90,7 +90,6 @@ def print_commands() -> None:
     print()
     for name, what in COMMANDS:
         print(f"  {style.bold(name.ljust(width))}  {what}")
-    print()
 
 
 def print_models(current: str) -> None:
@@ -101,7 +100,6 @@ def print_models(current: str) -> None:
         if name == current:
             line += style.dim("  (current)")
         print(f"  {line}")
-    print()
 
 
 def thinking_suffix(agent: Agent) -> str:
@@ -288,7 +286,7 @@ def main() -> None:
         print(style.warning("Read-only mode: every message behaves like /talk; no files can be changed."))
     else:
         print(style.dim("Start a message with /talk to ask, or /plan to get a plan to approve, without any files being changed."))
-    print(style.dim("Type /help to list commands, /reset to clear the conversation, /exit to quit.") + "\n")
+    print(style.dim("Type /help to list commands, /reset to clear the conversation, /exit to quit."))
 
     # While a plan is being discussed (after /plan, until it is approved or abandoned),
     # ordinary messages revise the plan instead of asking for work, write_file stays
@@ -297,8 +295,9 @@ def main() -> None:
 
     # Set by /paste: the next message submitted to the model gets the contents of
     # the harness's .loom-temp/paste.txt quoted in front of it, and the flag is
-    # then consumed. Commands that send nothing to the model leave it set; /reset
-    # clears it.
+    # then consumed. While it is set the prompt reads "you (with pasted text)>".
+    # Commands that send nothing to the model leave it set; /reset clears it and
+    # reverts the prompt.
     paste_pending = False
 
     while True:
@@ -306,10 +305,19 @@ def main() -> None:
         # very next prompt.
         suffix = thinking_suffix(agent)
         try:
+            # A blank line always separates the prompt from whatever came before it
+            # (the splash, a command's note, the tail of a model turn), so no other
+            # output needs to end with a blank line of its own.
+            print()
             if plan_mode:
                 prompt_line = style.prompt(f"plan{suffix}> ", style.BOLD, style.MAGENTA)
             else:
-                prompt_line = style.prompt(f"you{suffix}> ", style.BOLD, style.GREEN)
+                # While a paste is pending, label the prompt so the user can see
+                # the editor buffer will be quoted in front of this message;
+                # submitting (or /reset) consumes the flag and reverts the label.
+                # thinking_suffix() parentheses compose with this one.
+                label = "you (with pasted text)" if paste_pending else "you"
+                prompt_line = style.prompt(f"{label}{suffix}> ", style.BOLD, style.GREEN)
             user_text = input(prompt_line).strip()
         except (EOFError, KeyboardInterrupt):
             print()
@@ -380,7 +388,7 @@ def main() -> None:
                 continue
             open_in_editor(paste_path)
             paste_pending = True
-            print(style.dim(f"  [paste file open: {paste_path}; what you save there is pasted in front of your next message]"))
+            print(style.dim(f"  [pasting into file: {paste_path}]"))
             continue
 
         # Planning state machine. plan tells Agent.send what kind of message this is:
@@ -445,7 +453,7 @@ def main() -> None:
             else:
                 if paste_text:
                     user_text = f"The user pasted this text:\n\n{paste_text}\n\n{user_text}"
-                    print(style.dim(f"  [pasted {TEMP_DIR / PASTE_FILE} in front of your message]"))
+                    print(style.dim(f"  [pasted {PASTE_FILE} in front of your message]"))
                 else:
                     print(style.dim(f"  [{TEMP_DIR / PASTE_FILE} was empty; nothing pasted]"))
 

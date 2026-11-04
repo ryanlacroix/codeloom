@@ -435,6 +435,8 @@ class Workspace:
         print(f"\n  {style.paint(message, style.BOLD, style.YELLOW)}")
         for line in diff_lines:
             print(f"  {style.dim('|')} {line}")
+        # Like every prompt the user types at, the question is preceded by a blank line.
+        print()
         try:
             answer = input(style.prompt("  Allow this write? [y/N] ", style.BOLD)).strip().lower()
         except EOFError:
