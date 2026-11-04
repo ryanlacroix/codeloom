@@ -3,13 +3,13 @@
 import shutil
 import sys
 
-import style
-from api_client import Client
-from markdown import MarkdownStream
-from ollama_client import OllamaClient
-from models import MODELS, Usage, response_usage
-from tools import TOOLS, run_tool
-from workspace import ToolError, Workspace
+from ui import style
+from api.api_client import Client
+from ui.markdown import MarkdownStream
+from api.ollama_client import OllamaClient
+from api.models import MODELS, Usage, response_usage
+from core.tools import TOOLS, run_tool
+from core.workspace import ToolError, Workspace
 
 MAX_TOKENS = 16000
 # Prompt caching: the marker on the system prompt caches the tool definitions

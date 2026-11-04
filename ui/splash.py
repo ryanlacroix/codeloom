@@ -10,7 +10,7 @@ output, dumb terminal), keeping that output clean.
 
 import shutil
 
-import style
+from ui import style
 
 # "CodeLoom" in the braille-dots figlet style, kept exactly as generated
 # (leading blank line and trailing whitespace trimmed; see

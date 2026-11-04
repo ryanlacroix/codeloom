@@ -14,8 +14,8 @@ import codecs
 import re
 from pathlib import Path
 
-import style
-from diff import render_diff
+from ui import style
+from ui.diff import render_diff
 
 MAX_READ_BYTES = 1_000_000
 MAX_WRITE_BYTES = 1_000_000

@@ -1,6 +1,6 @@
 """The tools Claude may call. Anything not listed here is refused."""
 
-from workspace import ToolError, Workspace
+from core.workspace import ToolError, Workspace
 
 TOOLS = [
     {

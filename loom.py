@@ -38,13 +38,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-import splash
-import style
-from agent import Agent
-from api_client import APIConnectionError, APIError, Client
-from models import DEFAULT_MODEL, MODELS, OLLAMA_DEFAULT_MODEL, OLLAMA_MODELS
-from ollama_client import OllamaClient
-from workspace import Workspace
+from ui import splash, style
+from core.agent import Agent
+from api.api_client import APIConnectionError, APIError, Client
+from api.models import DEFAULT_MODEL, MODELS, OLLAMA_DEFAULT_MODEL, OLLAMA_MODELS
+from api.ollama_client import OllamaClient
+from core.workspace import Workspace
 
 try:
     # Importing readline gives input() line editing (arrow keys, history).

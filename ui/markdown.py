@@ -11,7 +11,7 @@ import re
 import shutil
 import string
 
-import style
+from ui import style
 
 ANSI = re.compile(r"\033\[[0-9;]*m")
 FENCES = ("```", "~~~")

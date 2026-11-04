@@ -9,7 +9,7 @@ import http.client
 import json
 import uuid
 
-from api_client import APIConnectionError, APIError, open_stream
+from api.api_client import APIConnectionError, APIError, open_stream
 
 API_URL = "https://ollama.com/api/chat"
 

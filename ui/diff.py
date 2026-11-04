@@ -12,7 +12,7 @@ lines were cut); the write itself replaces the whole file, as the model asked.
 
 import difflib
 
-import style
+from ui import style
 
 CONTEXT = 3
 MAX_DIFF_LINES = 100
