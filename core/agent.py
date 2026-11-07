@@ -376,15 +376,22 @@ class Agent:
                     result = run_tool(self.workspace, block["name"], tool_input)
                     # Every tool result — file contents, search matches,
                     # listings, confirmations, error notes — is read from user
-                    # data, so each one passes the redaction filter too. Both
-                    # shapes are handled: plain strings and read_file's note
-                    # blocks.
+                    # data, so each one passes the redaction filter, which
+                    # walks any shape: plain strings, read_file's note blocks,
+                    # or whatever a future tool returns.
                     if self.redactor:
                         result = self.redactor.redact_content(result)
                     tool_results.append({"type": "tool_result", "tool_use_id": block["id"], "content": result})
                 except (ToolError, OSError) as e:
+                    # The console keeps the raw message — the developer wants
+                    # the real path. The conversation gets a path-blind copy:
+                    # a raw OSError embeds the resolved absolute target, so
+                    # scrub_paths rewrites every absolute path relative to the
+                    # workspace root before the redaction filter runs on the
+                    # normalized text. (ToolError text already names paths as
+                    # the model asked for them; scrubbing is a no-op there.)
                     print(style.error(f"     error: {e}"))
-                    error_text = f"Error: {e}. This tool call failed and changed nothing."
+                    error_text = self.workspace.scrub_paths(f"Error: {e}. This tool call failed and changed nothing.")
                     if self.redactor:
                         error_text = self.redactor.redact(error_text)
                     tool_results.append(

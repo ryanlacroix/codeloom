@@ -21,9 +21,13 @@ rescans the text it has replaced, no entry can ever rewrite the marker.
 
 import re
 from pathlib import Path
+from typing import TypeVar
 
 # The replacement text for every configured string.
 REDACTED = "<redacted>"
+
+# Whatever shape a tool result comes back in: redact_content() preserves it.
+_T = TypeVar("_T")
 
 
 def load_redactions(path: Path) -> tuple[list[str], str | None]:
@@ -37,7 +41,7 @@ def load_redactions(path: Path) -> tuple[list[str], str | None]:
     as a warning that text goes unredacted.
     """
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
     except FileNotFoundError:
         return [], None
     except (OSError, UnicodeDecodeError) as e:
@@ -51,8 +55,8 @@ class Redactor:
 
     Truthiness follows the entry count, so `if redactor:` (or a None redactor)
     skips the pass for an empty config. redact() filters one text;
-    redact_content() filters a tool result, which is either a plain string or a
-    list of the note blocks read_file returns.
+    redact_content() filters a whole tool result — a plain string, read_file's
+    list of note blocks, or whatever other shape a tool hands back.
     """
 
     def __init__(self, strings: list[str]):
@@ -76,22 +80,28 @@ class Redactor:
         # would have its backslashes treated as escapes.
         return self.pattern.sub(lambda _match: REDACTED, text)
 
-    def redact_content(self, result: str | list) -> str | list:
-        """Redact one tool result: a plain string, or a list of text blocks.
+    def redact_content(self, result: _T) -> _T:
+        """Redact every string in one tool result, whatever shape it has.
 
-        read_file returns a string for a small UTF-8 page and a list of
-        {'type': 'text', 'text': ...} blocks when it prefixes notes (encoding,
-        page cuts); write tools answer with strings. Only each block's text is
-        replaced and every other key is copied unchanged, so the API keeps
-        seeing the same shape. Anything else passes through as-is.
+        Tool results reach the model as a plain string, read_file's list of
+        {'type': 'text', 'text': ...} blocks, or whatever a future tool or API
+        change returns, so this makes no assumptions about the shape: it walks
+        the whole structure and filters every string leaf wherever it sits —
+        list and tuple items, and dict values under any key. Containers are
+        rebuilt with the same shape, so the API sees exactly what it would
+        have seen unredacted. Dict keys are left alone: they are structural
+        labels like "type" and "text", and rewriting one would mangle the
+        payload rather than hide content. Leaves that are not strings (ints,
+        None, ...) cannot carry text; bytes could, but they cannot be
+        serialized into a message either, so both pass through unchanged
+        rather than being decoded and possibly damaged.
         """
         if isinstance(result, str):
             return self.redact(result)
         if isinstance(result, list):
-            return [
-                {**block, "text": self.redact(block["text"])}
-                if isinstance(block, dict) and isinstance(block.get("text"), str)
-                else block
-                for block in result
-            ]
+            return [self.redact_content(item) for item in result]
+        if isinstance(result, tuple):
+            return tuple(self.redact_content(item) for item in result)
+        if isinstance(result, dict):
+            return {key: self.redact_content(value) for key, value in result.items()}
         return result

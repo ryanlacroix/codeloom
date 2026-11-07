@@ -314,6 +314,11 @@ def main() -> None:
         root,
         auto_approve_writes=args.yes,
         fallback_encoding=args.fallback_encoding,
+        # search and read_file redact configured strings BEFORE their length cuts
+        # (search's 200-char match cap, read_file's page cap), so a secret
+        # straddling a truncation boundary is never shown as a partial fragment;
+        # agent.py still redacts every tool result again afterward.
+        redactor=redactor,
         # The paste buffer is off-limits to the model: it can neither read the
         # pending paste out of the harness's .loom-temp/paste.txt nor plant text
         # there to be quoted into a later "user" message. The buffer lives outside

@@ -11,9 +11,11 @@ symlink, so nothing outside the workspace can be reached through the walk.
 """
 
 import codecs
+import os
 import re
 from pathlib import Path
 
+from core.redact import Redactor
 from ui import style
 from ui.diff import render_diff
 
@@ -42,6 +44,13 @@ EXEC_RISK_NAMES = (
 )
 EXEC_RISK_PARTS = ("__pycache__", "venv", ".venv", "node_modules")
 
+# Absolute-path tokens in error text that scrub_paths() rewrites relative to
+# the workspace root: a Windows drive letter with its separator, or a leading
+# separator — but never one embedded in a URL (every '/' of 'https://…' is
+# preceded by ':' or '/'), nor a relative path such as './api/config.py' or
+# 'core/redact.py', which do not start with a separator.
+_ABS_PATH_RE = re.compile(r"""(?<![\w:/\\.-])(?:[A-Za-z]:[\\/]|[\\/])[^\s"'()<>,;]+""")
+
 
 class ToolError(Exception):
     """An error reported back to Claude as a failed tool result."""
@@ -59,10 +68,18 @@ class Workspace:
         protected_parts: tuple[str, ...] = (".git",),
         exec_risk_names: tuple[str, ...] = EXEC_RISK_NAMES,
         exec_risk_parts: tuple[str, ...] = EXEC_RISK_PARTS,
+        redactor: Redactor | None = None,
     ):
         self.root = root.resolve()
         self.auto_approve_writes = auto_approve_writes
         self.fallback_encoding = fallback_encoding
+        # The redaction filter, applied BEFORE any length cut so a configured
+        # string straddling a truncation boundary is redacted whole rather than
+        # leaking its visible fragment: search redacts each matching line before
+        # its 200-char cap, and read_file's windowed read redacts the page
+        # before its 1 MB cap (which can cut mid-line). agent.py redacts every
+        # tool result a second time afterward — a harmless double pass.
+        self.redactor = redactor
         # Files Claude may never read or write, even inside the workspace (e.g. the key file).
         self.blocked = {p.resolve() for p in blocked}
         # Path components nothing may sit in or under, compared case-insensitively so a
@@ -109,6 +126,63 @@ class Workspace:
 
     def display(self, path: Path) -> str:
         return str(path.relative_to(self.root)) or "."
+
+    def scrub_paths(self, text: str) -> str:
+        """Rewrite every absolute path in error text relative to the workspace.
+
+        Raw OSError messages carry the resolved absolute path the filesystem
+        call was given, and agent.py puts that text into the failed tool result
+        — so without this the model would learn the developer's home directory,
+        project location, and machine layout from every missing-file or
+        permission error. Instead of redacting, which would leave the model no
+        way to fix the input, each absolute path becomes its workspace-relative
+        spelling: the root's own path turns into '.' (or './' plus the rest
+        when it names something inside), and any other absolute path, which
+        containment makes unreachable in normal operation, is rewritten with
+        os.path.relpath as a '../…' path relative to this root too — with a
+        console note, because a path from outside the workspace reaching the
+        model deserves a look. The model keeps enough of every path to correct
+        the input that caused the error; only the absolute spelling goes.
+
+        ToolError messages need none of this: they name the path as the model
+        asked for it, which is already relative, and pass through untouched.
+        """
+        rooted = str(self.root)
+        # (?![\w.\-]) after the root keeps the rewrite off longer names that
+        # merely start with the root's path — a workspace 'proj' sitting next
+        # to a sibling 'proj.backup' must not become '.backup'; such a sibling
+        # is genuinely outside the workspace, so the fallback below rewrites
+        # it as a '../…' path instead. The captured trailing separator tells
+        # a child from the bare root ('.' vs './' + the rest).
+        spellings = [(rooted, os.sep)]
+        if os.altsep and os.altsep != os.sep:
+            spellings.append((rooted.replace(os.sep, os.altsep), os.altsep))
+        for spelling, sep in spellings:
+            text = re.sub(
+                "(?:" + re.escape(spelling) + r")(?![\w.\-])(" + re.escape(sep) + r")?",
+                lambda match: "./" if match.group(1) else ".",
+                text,
+            )
+        named_outside = False
+
+        def to_relative(match: re.Match[str]) -> str:
+            nonlocal named_outside
+            named_outside = True
+            token = match.group()
+            try:
+                return os.path.relpath(token, rooted)
+            except ValueError:
+                # os.path.relpath refuses a path on a Windows drive other than
+                # the root's: no relative spelling exists, so the token stays
+                # and the console note below reports it.
+                return token
+
+        text = _ABS_PATH_RE.sub(to_relative, text)
+        if named_outside:
+            print(style.warning(
+                "  [this error text named a path outside the workspace; it was rewritten relative to the root]"
+            ))
+        return text
 
     def list_directory(self, path: str) -> str:
         target = self.resolve(path)
@@ -208,6 +282,13 @@ class Workspace:
         if limit:
             chosen = chosen[:limit]
         page = "\n".join(chosen)
+        if self.redactor:
+            # Redact before the cap cut below: when one line is longer than the
+            # cap the cut is mid-line, and a configured string straddling that
+            # cut would otherwise leak its visible fragment (a cut "<reda"
+            # reveals nothing). Line numbers stay exact because the marker
+            # contains no newline.
+            page = self.redactor.redact(page)
         encoded = page.encode(encoding)
         cut = len(encoded) > MAX_READ_BYTES
         if cut:
@@ -318,6 +399,13 @@ class Workspace:
             relative = file.relative_to(self.root).as_posix()
             for line_no, line in enumerate(text.splitlines(), 1):
                 if regex.search(line):
+                    if self.redactor:
+                        # Redact the full line before the cap cut below: a
+                        # configured string straddling the truncation boundary
+                        # would otherwise leak its visible fragment (a cut
+                        # "<reda" reveals nothing). The match above stays on the
+                        # raw line, so redaction never changes which lines match.
+                        line = self.redactor.redact(line)
                     cut = line[:MAX_MATCH_CHARS] + ("..." if len(line) > MAX_MATCH_CHARS else "")
                     matches.append(f"{relative}:{line_no}: {cut}")
                     if len(matches) >= result_cap:
