@@ -44,6 +44,7 @@ from core.agent import Agent
 from api.api_client import APIConnectionError, APIError, Client
 from api.models import DEFAULT_MODEL, MODELS, OLLAMA_DEFAULT_MODEL, OLLAMA_MODELS
 from api.ollama_client import OllamaClient
+from core.redact import Redactor, load_redactions
 from core.workspace import Workspace
 
 try:
@@ -71,6 +72,16 @@ PLAN_FILE = "plan.md"
 # submitted to the model. The path is also given to the Workspace as blocked, so
 # the model can neither read nor write the paste buffer.
 PASTE_FILE = "paste.txt"
+
+# Every text sent to the model — user input, /paste buffers, and everything the
+# tools return (file contents, search matches, listings, error notes) — passes
+# through a redaction filter (core/redact.py, applied in core/agent.py before
+# anything joins the conversation): each string listed in this file is replaced
+# with "<redacted>". Like the key files it sits next to loom.py, outside the
+# workspace, so the model can neither read nor edit its own redaction list; it
+# is also passed to the Workspace's blocked list below, in case this directory
+# is ever itself the workspace. Read once at startup; edits need a restart.
+REDACT_FILE = "redact.txt"
 
 # Slash commands typed at the "you>" prompt; /help lists these.
 COMMANDS = [
@@ -263,6 +274,13 @@ def main() -> None:
         default="cp1252",
         help="encoding assumed for files that are not valid UTF-8 (default: cp1252)",
     )
+    parser.add_argument(
+        "--redact-file",
+        type=Path,
+        default=SCRIPT_DIR / REDACT_FILE,
+        help=f"strings to replace with '<redacted>' in everything sent to the model, one per line "
+        f"(default: {REDACT_FILE} next to loom.py)",
+    )
     args = parser.parse_args()
 
     if args.provider == "claude":
@@ -284,6 +302,14 @@ def main() -> None:
     except LookupError:
         sys.exit(f"Unknown encoding: {args.fallback_encoding}")
 
+    # The redaction list is read before anything else touches the model: the
+    # filter it configures wraps every text that joins the conversation
+    # (core/agent.py). A missing file is the normal opt-out; one that exists
+    # but cannot be read is reported next to the splash and text is sent
+    # unredacted — never a silent failure.
+    redaction_strings, redaction_error = load_redactions(args.redact_file)
+    redactor = Redactor(redaction_strings)
+
     workspace = Workspace(
         root,
         auto_approve_writes=args.yes,
@@ -297,10 +323,16 @@ def main() -> None:
         # resolves every blocked entry with Path.resolve(), which succeeds for a
         # file that does not exist yet, so this holds even before the first /paste
         # creates the file.
-        blocked=(TEMP_DIR / PASTE_FILE, *(path for path, _ in KEY_FILES.values())),
+        # redact.txt is blocked like the key files, so the model can never read
+        # (and so learn to echo) or edit its own redaction list.
+        blocked=(TEMP_DIR / PASTE_FILE, args.redact_file, *(path for path, _ in KEY_FILES.values())),
     )
     agent = Agent(
-        make_client(args.provider, args.think), workspace, model=args.model, show_thinking=not args.hide_thinking
+        make_client(args.provider, args.think),
+        workspace,
+        model=args.model,
+        show_thinking=not args.hide_thinking,
+        redactor=redactor,
     )
 
     splash.print_splash()
@@ -308,6 +340,18 @@ def main() -> None:
     print(f"{style.bold('Model:')}     {style.model_label(args.model)} {style.dim(f'({args.provider})')}")
     if args.think:
         print(f"{style.bold('Thinking:')}  {args.think} {style.dim('(toggle with /thinking-on, /thinking-off)')}")
+    if redaction_error:
+        # The config exists but is unreadable: say so instead of failing to
+        # start, but never quietly drop the redaction the user asked for.
+        print(f"{style.bold('Redaction:')} off {style.warning(f'({redaction_error}; text is sent unredacted)')}")
+    elif len(redactor):
+        print(
+            f"{style.bold('Redaction:')} {len(redactor)} string{'s' if len(redactor) != 1 else ''}"
+            f" replaced with '<redacted>' {style.dim(f'({args.redact_file.name})')}"
+        )
+    else:
+        state = "no entries yet" if args.redact_file.exists() else "file not found"
+        print(f"{style.bold('Redaction:')} none {style.dim(f'({args.redact_file}: {state})')}")
     print()
     print(style.dim("The model can read and write files here only. No commands can be run, and .git is protected."))
     if args.talk:

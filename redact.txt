@@ -1,0 +1,25 @@
+# Redaction list for loom — one string per line.
+# Every text sent to the model (user messages, /paste buffers, and everything
+# the tools return: file contents, search matches, listings, errors) passes
+# through this filter before it reaches the API: each entry below is replaced
+# by the literal "<redacted>".
+#
+# Rules
+#   - Entries are matched literally (not as a regex), case-sensitively, and
+#     anywhere in the text.
+#   - Blank lines and lines starting with '#' are ignored; whitespace around
+#     an entry is trimmed, so an entry cannot be empty.
+#   - Entries are applied in one pass, longest first: where one entry contains
+#     another, the longer one is redacted whole.
+#   - Reads are redacted too: an entry you expect the model to copy from a
+#     read_file into an edit_file must NOT be listed here, or the edit will
+#     not match the file on disk and will be refused.
+#   - The file sits next to loom.py, outside any project workspace, and is
+#     blocked from the model's tools. Edit it by hand and restart loom (or
+#     pass --redact-file to point at another file).
+#
+# Examples — remove the leading '#' to activate:
+#email@address.com
+#auth-key-12rf2gw2hg
+hello
+cracked.com

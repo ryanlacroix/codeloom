@@ -8,6 +8,7 @@ from api.api_client import Client
 from ui.markdown import MarkdownStream
 from api.ollama_client import OllamaClient
 from api.models import MODELS, Usage, response_usage
+from core.redact import Redactor
 from core.tools import TOOLS, run_tool
 from core.workspace import ToolError, Workspace
 
@@ -216,11 +217,20 @@ class StreamPrinter:
 
 class Agent:
     def __init__(
-        self, client: Client | OllamaClient, workspace: Workspace, model: str, show_thinking: bool = True
+        self,
+        client: Client | OllamaClient,
+        workspace: Workspace,
+        model: str,
+        show_thinking: bool = True,
+        redactor: Redactor | None = None,
     ):
         self.client = client
         self.workspace = workspace
         self.model = model
+        # Replaces each developer-configured string with "<redacted>" in every
+        # text that enters the conversation below (core/redact.py); None, or an
+        # empty Redactor, sends text unchanged.
+        self.redactor = redactor
         # Only Claude models have prices; Ollama Cloud is billed by subscription.
         self.priced = model in MODELS
         self.label = "claude" if self.priced else model
@@ -256,6 +266,13 @@ class Agent:
         """
         turn_usage = Usage()
         self.read_only = read_only or plan in ("start", "update")
+        # Redaction runs first, so everything the model is told — user input, a
+        # /paste buffer (already merged into user_text by loom.py), and the
+        # /plan and /talk notes prepended below — has passed the filter.
+        # Filtering here rather than in request_body() also keeps configured
+        # strings out of the stored history: they never join the conversation.
+        if self.redactor:
+            user_text = self.redactor.redact(user_text)
         if plan == "start":
             user_text = PLAN_NOTE + user_text
         elif plan == "update":
@@ -357,14 +374,24 @@ class Agent:
                     if self.read_only and block["name"] in WRITE_TOOLS:
                         raise ToolError("writes are disabled: this message is read-only (sent with /talk or /plan)")
                     result = run_tool(self.workspace, block["name"], tool_input)
+                    # Every tool result — file contents, search matches,
+                    # listings, confirmations, error notes — is read from user
+                    # data, so each one passes the redaction filter too. Both
+                    # shapes are handled: plain strings and read_file's note
+                    # blocks.
+                    if self.redactor:
+                        result = self.redactor.redact_content(result)
                     tool_results.append({"type": "tool_result", "tool_use_id": block["id"], "content": result})
                 except (ToolError, OSError) as e:
                     print(style.error(f"     error: {e}"))
+                    error_text = f"Error: {e}. This tool call failed and changed nothing."
+                    if self.redactor:
+                        error_text = self.redactor.redact(error_text)
                     tool_results.append(
                         {
                             "type": "tool_result",
                             "tool_use_id": block["id"],
-                            "content": f"Error: {e}. This tool call failed and changed nothing.",
+                            "content": error_text,
                             "is_error": True,
                         }
                     )
