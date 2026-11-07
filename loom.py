@@ -32,6 +32,7 @@ Uses only the Python standard library; the API is called directly over HTTPS.
 
 import argparse
 import codecs
+import difflib
 import os
 import stat
 import subprocess
@@ -86,6 +87,13 @@ COMMANDS = [
     ("/exit", "leave the harness (also: /quit)"),
 ]
 
+# The command words the prompt recognizes, derived from COMMANDS (the first token
+# of each entry, so "/model [name]" yields "/model") plus the /quit alias, which
+# COMMANDS mentions only inside /exit's description. Any prompt line starting with
+# "/" is a command attempt; when its first word is not one of these it is a typo
+# (/page, /jump) and is rejected without being sent to the model.
+COMMAND_WORDS = frozenset(name.split(maxsplit=1)[0] for name, _ in COMMANDS) | {"/quit"}
+
 
 def print_commands() -> None:
     width = max(len(name) for name, _ in COMMANDS)
@@ -102,6 +110,19 @@ def print_models(current: str) -> None:
         if name == current:
             line += style.dim("  (current)")
         print(f"  {line}")
+
+
+def unknown_command_error(word: str) -> str:
+    """The rejection message for a prompt line whose first word is not a command.
+
+    Such a line — /page, /jump, a bare "/" — used to be sent to the model as
+    conversation text (in plan mode it would silently have revised the plan); now
+    it stops at the prompt. The nearest real command by spelling (difflib) is
+    suggested, so /page points at /paste, and the /help pointer lists them all.
+    """
+    close = difflib.get_close_matches(word, sorted(COMMAND_WORDS), n=1, cutoff=0.6)
+    hint = f" ~ did you mean {close[0]}?" if close else ""
+    return f"command not recognized: {word}{hint} (/help for all commands)"
 
 
 def thinking_suffix(agent: Agent) -> str:
@@ -331,9 +352,23 @@ def main() -> None:
             break
         if not user_text:
             continue
-        if user_text in ("/exit", "/quit"):
+        # The first word decides. A line starting with "/" is a command attempt;
+        # if its first word matches no command — /page, /jump, a bare "/" — it is
+        # a typo, rejected here instead of being sent to the model as normal
+        # conversation text (in plan mode it would silently revise the plan).
+        # The note points at /help and suggests the closest command by spelling.
+        # Nothing below runs, so a pending paste stays pending.
+        word = user_text.split(None, 1)[0]
+        if user_text.startswith("/") and word not in COMMAND_WORDS:
+            print(style.warning(f"  [{unknown_command_error(word)}]"))
+            continue
+        # The recognized commands are matched by first word, so trailing text
+        # after the no-argument ones ("/exit now", "/ok yes") is the command with
+        # junk after it rather than a message slipping through to the model; the
+        # argument-taking commands below strip the word and parse the rest.
+        if word in ("/exit", "/quit"):
             break
-        if user_text == "/reset":
+        if word == "/reset":
             agent.messages = []
             plan_mode = False
             paste_pending = False
@@ -342,7 +377,7 @@ def main() -> None:
             else:
                 print(style.dim("  [conversation cleared]"))
             continue
-        if user_text == "/help":
+        if word == "/help":
             print_commands()
             continue
         # /thinking-on and /thinking-off toggle model thinking for all later messages, in
@@ -350,8 +385,8 @@ def main() -> None:
         # returns with its pending plan intact). Anything typed after the command
         # word is ignored, and nothing is sent to the model. Handled here, before
         # the planning state machine, like /reset and /help.
-        if user_text.startswith("/thinking-on") or user_text.startswith("/thinking-off"):
-            on = user_text.startswith("/thinking-on")
+        if word in ("/thinking-on", "/thinking-off"):
+            on = word == "/thinking-on"
             agent.show_thinking = on
             if not agent.priced:
                 # Ollama: "off" stops thinking server-side as well as hiding it, and
@@ -365,7 +400,7 @@ def main() -> None:
         # Cloud model name, like --model at startup. Handled here, before the planning
         # state machine, so it also works while a plan is open, and nothing is sent
         # to the model.
-        if user_text == "/model" or user_text.startswith(("/model ", "/model\t")):
+        if word == "/model":
             name = user_text[len("/model") :].strip()
             if not name:
                 print_models(agent.model)
@@ -384,7 +419,7 @@ def main() -> None:
         # the commands above, it works while a plan is open and sends nothing to
         # the model; anything typed after the command word is ignored. If a paste
         # is already pending the file is only reopened, so an unsent draft is kept.
-        if user_text == "/paste" or user_text.startswith(("/paste ", "/paste\t")):
+        if word == "/paste":
             paste_path = TEMP_DIR / PASTE_FILE
             try:
                 paste_path.parent.mkdir(parents=True, exist_ok=True)
@@ -401,14 +436,14 @@ def main() -> None:
         # Planning state machine. plan tells Agent.send what kind of message this is:
         # "start" proposes a plan, "update" revises it, "approved" implements it.
         plan = None
-        if user_text == "/ok":
+        if word == "/ok":
             if not plan_mode:
                 print(style.dim("  [no plan to accept — start one with /plan <task>]"))
                 continue
             plan = "approved"
             user_text = ""  # the approval note is all the model needs; prepended by agent.send
             print(style.dim("  [plan approved]"))
-        elif user_text == "/cancel":
+        elif word == "/cancel":
             if not plan_mode:
                 print(style.dim("  [not in plan mode]"))
                 continue
@@ -416,16 +451,14 @@ def main() -> None:
             print(style.dim("  [plan mode off; the plan stays in the conversation]"))
             continue
         else:
-            if user_text == "/plan" or user_text.startswith(("/plan ", "/plan\t")):
+            if word == "/plan":
                 user_text = user_text[len("/plan") :].strip()
                 if not user_text:
                     print(style.dim("  [usage: /plan <task>; the model proposes a plan and changes no files]"))
                     continue
                 plan = "start"
                 print(style.dim("  [plan mode: the model will propose what to implement; no files will be changed]"))
-            elif plan_mode and not (
-                user_text == "/talk" or user_text.startswith(("/talk ", "/talk\t"))
-            ):
+            elif plan_mode and word != "/talk":
                 # Ordinary messages while planning are feedback that revises the plan;
                 # /talk stays a side question and cannot change files either.
                 plan = "update"
@@ -433,8 +466,8 @@ def main() -> None:
 
         # With --talk every message is read-only; the /talk prefix makes just its
         # message read-only. The prefix is stripped in both cases.
-        read_only = args.talk or user_text == "/talk" or user_text.startswith(("/talk ", "/talk\t"))
-        if read_only and user_text.startswith("/talk"):
+        read_only = args.talk or word == "/talk"
+        if word == "/talk":
             user_text = user_text[len("/talk") :].strip()
             if not user_text:
                 print(style.dim("  [usage: /talk <question>; the model can read files but not change them]"))
