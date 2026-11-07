@@ -73,6 +73,10 @@ PLAN_FILE = "plan.md"
 # the model can neither read nor write the paste buffer.
 PASTE_FILE = "paste.txt"
 
+# The fixed text /continue sends, telling the model to resume a reply that was cut
+# off by the harness's 16k output limit (agent.py's MAX_TOKENS, echoed here).
+CONTINUE_MESSAGE = "Your last message hit the 16k limit. Continue your work, picking up where you left off"
+
 # Every text sent to the model — user input, /paste buffers, and everything the
 # tools return (file contents, search matches, listings, error notes) — passes
 # through a redaction filter (core/redact.py, applied in core/agent.py before
@@ -94,6 +98,7 @@ COMMANDS = [
     ("/plan <task>", "propose an implementation plan for the task, changing no files"),
     ("/ok", "approve the current plan and have the model implement it"),
     ("/cancel", "leave plan mode without implementing the plan"),
+    ("/continue", "resume after a reply cut off by the output limit"),
     ("/reset", "clear the conversation and start over"),
     ("/exit", "leave the harness (also: /quit)"),
 ]
@@ -481,6 +486,17 @@ def main() -> None:
             paste_pending = True
             print(style.dim(f"  [pasting into file: {paste_path}]"))
             continue
+
+        # /continue sends a fixed nudge telling the model to resume a reply cut off
+        # by the output limit (agent.py's max_tokens handling, which drops any
+        # cut-off tool call first, so the history it resumes from is valid). The
+        # user text is replaced and the handler falls through to the ordinary send
+        # path below rather than continuing: with a plan open the planning state
+        # machine sends it as a plan update, and pending paste quoting, error
+        # rollback, and usage printing all apply as for any message. Anything
+        # typed after the command word is ignored.
+        if word == "/continue":
+            user_text = CONTINUE_MESSAGE
 
         # Planning state machine. plan tells Agent.send what kind of message this is:
         # "start" proposes a plan, "update" revises it, "approved" implements it.
