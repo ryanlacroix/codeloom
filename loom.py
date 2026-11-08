@@ -73,19 +73,23 @@ PLAN_FILE = "plan.md"
 # the model can neither read nor write the paste buffer.
 PASTE_FILE = "paste.txt"
 
-# The fixed text /continue sends, telling the model to resume a reply that was cut
-# off by the harness's 16k output limit (agent.py's MAX_TOKENS, echoed here).
-CONTINUE_MESSAGE = "Your last message hit the 16k limit. Continue your work, picking up where you left off"
+# The fixed text /continue sends, telling the model to resume a reply cut off by
+# the harness's output limit (agent.py's MAX_TOKENS). The wording is generic — no
+# number, and "response" rather than "message" — so it stays accurate whichever
+# way the reply was cut off: mid-text, mid-thinking, or when the cut-off tool
+# call meant the reply left no trace in the history at all.
+CONTINUE_MESSAGE = "Your last response was cut off by the output limit before it was finished. Continue your work, picking up where you left off."
 
 # Every text sent to the model — user input, /paste buffers, and everything the
 # tools return (file contents, search matches, listings, error notes) — passes
 # through a redaction filter (core/redact.py, applied in core/agent.py before
-# anything joins the conversation): each string listed in this file is replaced
-# with "<redacted>". Like the key files it sits next to loom.py, outside the
-# workspace, so the model can neither read nor edit its own redaction list; it
-# is also passed to the Workspace's blocked list below, in case this directory
-# is ever itself the workspace. Read once at startup; edits need a restart.
-REDACT_FILE = "redact.txt"
+# anything joins the conversation): each string in redact.json's "redactList"
+# is replaced with the "replaceWith" marker, "<redacted>" by default. Like the
+# key files it sits next to loom.py, outside the workspace, so the model can
+# neither read nor edit its own redaction list; it is also passed to the
+# Workspace's blocked list below, in case this directory is ever the
+# workspace. Read once at startup; edits need a restart.
+REDACT_FILE = "redact.json"
 
 # Slash commands typed at the "you>" prompt; /help lists these.
 COMMANDS = [
@@ -283,7 +287,8 @@ def main() -> None:
         "--redact-file",
         type=Path,
         default=SCRIPT_DIR / REDACT_FILE,
-        help=f"strings to replace with '<redacted>' in everything sent to the model, one per line "
+        help=f"the strings listed under 'redactList' are replaced with the file's 'replaceWith' "
+        f"marker ('<redacted>' by default) in everything sent to the model "
         f"(default: {REDACT_FILE} next to loom.py)",
     )
     args = parser.parse_args()
@@ -310,10 +315,10 @@ def main() -> None:
     # The redaction list is read before anything else touches the model: the
     # filter it configures wraps every text that joins the conversation
     # (core/agent.py). A missing file is the normal opt-out; one that exists
-    # but cannot be read is reported next to the splash and text is sent
-    # unredacted — never a silent failure.
-    redaction_strings, redaction_error = load_redactions(args.redact_file)
-    redactor = Redactor(redaction_strings)
+    # but cannot be loaded (unreadable, invalid JSON, wrong shape) is reported
+    # next to the splash and text is sent unredacted — never a silent failure.
+    redaction_strings, redaction_marker, redaction_error = load_redactions(args.redact_file)
+    redactor = Redactor(redaction_strings, redaction_marker)
 
     workspace = Workspace(
         root,
@@ -333,7 +338,7 @@ def main() -> None:
         # resolves every blocked entry with Path.resolve(), which succeeds for a
         # file that does not exist yet, so this holds even before the first /paste
         # creates the file.
-        # redact.txt is blocked like the key files, so the model can never read
+        # redact.json is blocked like the key files, so the model can never read
         # (and so learn to echo) or edit its own redaction list.
         blocked=(TEMP_DIR / PASTE_FILE, args.redact_file, *(path for path, _ in KEY_FILES.values())),
     )
@@ -357,7 +362,7 @@ def main() -> None:
     elif len(redactor):
         print(
             f"{style.bold('Redaction:')} {len(redactor)} string{'s' if len(redactor) != 1 else ''}"
-            f" replaced with '<redacted>' {style.dim(f'({args.redact_file.name})')}"
+            f" replaced with {redaction_marker} {style.dim(f'({args.redact_file.name})')}"
         )
     else:
         state = "no entries yet" if args.redact_file.exists() else "file not found"

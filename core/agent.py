@@ -227,9 +227,10 @@ class Agent:
         self.client = client
         self.workspace = workspace
         self.model = model
-        # Replaces each developer-configured string with "<redacted>" in every
-        # text that enters the conversation below (core/redact.py); None, or an
-        # empty Redactor, sends text unchanged.
+        # Replaces each developer-configured string with the redact.json marker
+        # ("<redacted>" by default) in every text that enters the conversation
+        # below (core/redact.py); None, or an empty Redactor, sends text
+        # unchanged.
         self.redactor = redactor
         # Only Claude models have prices; Ollama Cloud is billed by subscription.
         self.priced = model in MODELS
