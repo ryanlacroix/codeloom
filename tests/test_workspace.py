@@ -74,19 +74,19 @@ class ProtectedDirTest(WorkspaceTest):
     def setUp(self) -> None:
         super().setUp()
         (self.root / "config").mkdir()
-        (self.root / "config" / "ollama_key.txt").write_text("sk-secret\n")
+        (self.root / "config" / "ollama_config.json").write_text("sk-secret\n")
         (self.root / "a.txt").write_text("plain\n")
         self.ws = make_workspace(self.root, protected_dirs=(self.root / "config",))
 
     def test_the_directory_is_denied_at_any_depth(self) -> None:
-        for path in ("config", "config/ollama_key.txt", "config/sub/more.txt", "config/../config/ollama_key.txt"):
+        for path in ("config", "config/ollama_config.json", "config/sub/more.txt", "config/../config/ollama_config.json"):
             with self.assertRaises(ToolError) as cm:
                 self.ws.resolve(path)
             self.assertIn("protected directory", str(cm.exception))
 
     def test_reads_inside_the_directory_are_refused(self) -> None:
         with self.assertRaises(ToolError) as cm:
-            self.ws.read_file("config/ollama_key.txt")
+            self.ws.read_file("config/ollama_config.json")
         self.assertIn("protected directory", str(cm.exception))
 
     def test_writes_inside_the_directory_are_refused(self) -> None:

@@ -26,11 +26,14 @@ cannot reach anything outside the workspace either.
 Auth: the harness reads every secret, and its own configuration, from config/ —
 a directory inside this repo that is in .gitignore and invisible to the model
 (the Workspace is given config/ as a protected directory: nothing in it can be
-listed, read, written, or searched, even when this repo is the workspace). Put
-your Ollama API key in config/ollama_key.txt (sent as a Bearer token) and, to use
-a custom Anthropic-compatible /v1/messages endpoint instead, config/api_config.json: a JSON file with that endpoint's base_url
-and api_key (plus optional model, models, headers); --api-config FILE points
-elsewhere. config/redact.json is the redaction list (see REDACT_FILE).
+listed, read, written, or searched, even when this repo is the workspace). The
+provider is Ollama by default, configured by config/ollama_config.json: a JSON
+file holding that endpoint's api_key (required — the only key source), plus
+optional base_url, model, models, headers. To use a custom Anthropic-compatible
+/v1/messages endpoint instead, config/anthropic_config.json: the same shape,
+with base_url and api_key required — that file's presence (or --api-config FILE
+pointing at another one) selects the endpoint. config/redact.json is the
+redaction list (see REDACT_FILE).
 
 Uses only the Python standard library; the API is called directly over HTTPS.
 """
@@ -39,7 +42,6 @@ import argparse
 import codecs
 import difflib
 import os
-import stat
 import subprocess
 import sys
 from collections.abc import Callable
@@ -53,7 +55,7 @@ from core.session import PASTE_FILE, TEMP_DIR, Session, Submit
 from api.anthropic_client import AnthropicClient, load_endpoint_config
 from api.http_client import APIConnectionError, APIError
 from api.models import OLLAMA_DEFAULT_MODEL, OLLAMA_MODELS
-from api.ollama_client import OllamaClient
+from api.ollama_client import OllamaClient, load_ollama_config
 from core.redact import Redactor, load_redactions
 from core.workspace import Workspace
 
@@ -65,18 +67,19 @@ except ImportError:
     pass
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-# The harness's configuration directory, inside this repo: the API keys, the
-# --api-config endpoint file, and the redaction list all live here. It is
+# The harness's configuration directory, inside this repo: each endpoint's
+# key-bearing config file and the redaction list live here. It is
 # passed to the Workspace's protected_dirs below, so nothing under it — not a
 # listing, not a read, not a write, not a search — ever reaches the model,
 # whichever directory is open as the workspace; and it is in .gitignore, so
 # the secrets stay out of git history too.
 CONFIG_DIR = SCRIPT_DIR / "config"
-# The Ollama API key file, sent to the API as a Bearer token (see the docstring).
-KEY_FILE = CONFIG_DIR / "ollama_key.txt"
-# The Anthropic-compatible endpoint config; its presence selects that endpoint
-# (--api-config points elsewhere), and it is read only when selected.
-API_CONFIG_FILE = CONFIG_DIR / "api_config.json"
+# Each endpoint is described by a JSON file here that holds its key (see the
+# docstring). Ollama is the default provider and its file is required; the
+# Anthropic-compatible endpoint's file is optional — its presence (or
+# --api-config pointing elsewhere) selects that endpoint instead.
+OLLAMA_CONFIG_FILE = CONFIG_DIR / "ollama_config.json"
+ANTHROPIC_CONFIG_FILE = CONFIG_DIR / "anthropic_config.json"
 
 # Every text sent to the model — user input, /paste buffers, and everything the
 # tools return (file contents, search matches, listings, error notes) — passes
@@ -137,10 +140,10 @@ def print_commands() -> None:
         print(f"  {style.bold(entry.usage.ljust(width))}  {entry.help}")
 
 
-# The names /model lists (and marks as known): Ollama Cloud's by default, or the
-# --api-config file's "models" list when that flag selects the Anthropic-compatible
-# endpoint. Replaced by main() at startup; any name is accepted either way, /model
-# <name> just notes when the name is not in the list.
+# The names /model lists (and marks as known): Ollama's catalogue defaults, or
+# the active endpoint config file's "models" list. Replaced by main() at startup;
+# any name is accepted either way, /model <name> just notes when the name is not
+# in the list.
 MODEL_CHOICES: tuple = OLLAMA_MODELS
 
 
@@ -167,25 +170,6 @@ def unknown_command_error(word: str) -> str:
     close = difflib.get_close_matches(word, sorted(COMMANDS), n=1, cutoff=0.6)
     hint = f" ~ did you mean {close[0]}?" if close else ""
     return f"command not recognized: {word}{hint} (/help for all commands)"
-
-
-def read_key() -> str:
-    """Read the Ollama API key, exiting with guidance when it is missing or empty."""
-    what = "Ollama API key"
-    try:
-        key = KEY_FILE.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        sys.exit(f"No key file found. Put your {what} in {KEY_FILE}")
-    except (OSError, UnicodeDecodeError) as e:
-        sys.exit(f"Could not read {KEY_FILE}: {e}")
-    if not key:
-        sys.exit(f"{KEY_FILE} is empty. Put your {what} in it.")
-    # POSIX-only: Windows st_mode always reports 0666 without reflecting the
-    # file's ACLs, so there the check would warn on every launch whatever the
-    # real protection; on POSIX the bits mean what they say.
-    if sys.platform != "win32" and KEY_FILE.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO):
-        print(style.warning(f"Warning: {KEY_FILE} can be read by other users. Run: chmod 600 {KEY_FILE}") + "\n")
-    return key
 
 
 def make_approver(auto_approve: bool):
@@ -406,10 +390,9 @@ def plain_submit(session, args, line) -> Submit:
 
 
 def main() -> None:
-    # Rebinds the module's MODEL_CHOICES when --api-config supplies its own list.
+    # Rebinds the module's MODEL_CHOICES when an endpoint config supplies its own list.
     global MODEL_CHOICES
-    # Clear the console before anything is printed, including argparse usage
-    # errors and the key-file warning (which used to precede the splash).
+    # Clear the console before anything is printed, including argparse usage errors.
     style.clear_screen()
     parser = argparse.ArgumentParser(description="Locked-down file-only coding agent for Ollama Cloud.")
     parser.add_argument("dir", help="project directory the model may access (required)")
@@ -427,9 +410,9 @@ def main() -> None:
     parser.add_argument(
         "--model",
         default=None,
-        help=f"model to use; with --api-config the config's \"model\" is the default, "
-        f"without it an Ollama Cloud model, which the cloud catalogue decides what exists "
-        f"(default: {OLLAMA_DEFAULT_MODEL})",
+        help=f"model to use; the active endpoint config's \"model\" is the default, and its "
+        f"\"models\" list feeds /model. Absent a config default, an Ollama Cloud model is "
+        f"used (the cloud catalogue decides what exists; default: {OLLAMA_DEFAULT_MODEL})",
     )
     parser.add_argument(
         "--api-config",
@@ -437,9 +420,10 @@ def main() -> None:
         type=Path,
         help="use an Anthropic-compatible /v1/messages endpoint described by this JSON file "
         "(base_url and api_key required; model, models and headers optional) instead of "
-        "Ollama Cloud. The default is config/api_config.json next to loom.py, and that "
-        "file selects the endpoint when present; an explicitly named file must exist. "
-        "The file holds the key, so it lives in config/, hidden from the model",
+        "Ollama Cloud, the default provider. The default is config/anthropic_config.json "
+        "next to loom.py, and that file selects the endpoint when present; an explicitly "
+        "named file must exist. The file holds the key, so it lives in config/, hidden "
+        "from the model",
     )
     parser.add_argument(
         "--think",
@@ -469,15 +453,18 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # --api-config swaps Ollama Cloud for an Anthropic-compatible /v1/messages
-    # endpoint. Without the flag, the default file in config/ selects that
-    # endpoint by existing — absent, it is the normal opt-out, quiet like
-    # redaction's missing file; with the flag, the file the user named must be
-    # there (the loader's note says so). The file is read here, before any
-    # client exists, because its "model" is the default --model and its
-    # "models" is the /model list below; a problem with it stops the harness.
-    if not args.api_config and API_CONFIG_FILE.is_file():
-        args.api_config = API_CONFIG_FILE
+    # The provider: Ollama by default, or the Anthropic-compatible /v1/messages
+    # endpoint when --api-config names a file — or the default
+    # config/anthropic_config.json exists. Both providers are described by a
+    # JSON file in config/ that also holds the key, so the Ollama file is
+    # required (there is no other key source), while the Anthropic one is the
+    # quiet opt-in, like redaction's missing file; with the flag, the file the
+    # user named must be there (the loader's note says so). Each file is read
+    # here, before any client exists, because its "model" is the default
+    # --model and its "models" the /model list below; a problem with it stops
+    # the harness.
+    if not args.api_config and ANTHROPIC_CONFIG_FILE.is_file():
+        args.api_config = ANTHROPIC_CONFIG_FILE
     endpoint_config = {}
     if args.api_config:
         endpoint_config, config_error = load_endpoint_config(args.api_config)
@@ -486,6 +473,18 @@ def main() -> None:
         if not endpoint_config.get("model"):
             sys.exit(f'{args.api_config} names no model: add a "model" (or a "models" list) or pass --model')
         MODEL_CHOICES = tuple(endpoint_config.get("models") or ())
+    elif OLLAMA_CONFIG_FILE.is_file():
+        endpoint_config, config_error = load_ollama_config(OLLAMA_CONFIG_FILE)
+        if config_error:
+            sys.exit(config_error)
+        # "models" absent or empty: fall back to the Ollama catalogue defaults
+        # (an Anthropic config must list its models; Ollama has hard defaults).
+        MODEL_CHOICES = tuple(endpoint_config.get("models") or OLLAMA_MODELS)
+    else:
+        sys.exit(
+            f"No endpoint configuration found. Put the Ollama endpoint's settings in {OLLAMA_CONFIG_FILE}: "
+            'an "api_key" (required), plus optional "base_url", "model", "models" and "headers"'
+        )
     args.model = args.model or endpoint_config.get("model") or OLLAMA_DEFAULT_MODEL
     args.think = args.think or "on"
     if not args.dir.strip():
@@ -536,13 +535,13 @@ def main() -> None:
         protected_dirs=(CONFIG_DIR,),
     )
     # The client talks to whichever API was chosen: Ollama Cloud by default, or
-    # the --api-config endpoint (whose key comes from its file, so ollama_key.txt
-    # is not asked for). Both take the same think setting and expose the same
-    # interface to the Agent.
+    # the --api-config endpoint. Each provider's config file holds its key, and
+    # endpoint_config is that file's contents. Both take the same think setting
+    # and expose the same interface to the Agent.
     agent = Agent(
         AnthropicClient(endpoint_config, think=args.think)
         if args.api_config
-        else OllamaClient(read_key(), think=args.think),
+        else OllamaClient(endpoint_config, think=args.think),
         workspace,
         model=args.model,
         show_thinking=not args.hide_thinking,
@@ -629,9 +628,8 @@ def main() -> None:
             del agent.messages[history_len:]
         except APIError as e:
             if e.status == 401:
-                # Which credential source to check depends on the API in use: the
-                # --api-config file's key, or the Ollama key file.
-                source = args.api_config if args.api_config else KEY_FILE
+                # Both endpoints hold their key in their config file; say which one to check.
+                source = args.api_config if args.api_config else OLLAMA_CONFIG_FILE
                 print(style.error(f"  [authentication failed: check the API key in {source}]"))
             elif e.status == 429:
                 print(style.warning("  [rate limited: wait a moment and try again]"))

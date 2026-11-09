@@ -13,7 +13,7 @@ via your editor (`/paste`), and thinking toggles.
 
 ## Quick start
 
-    python loom.py <project-dir>            # interactive session
+    python loom.py <project-dir>            # interactive session (needs config/ollama_config.json)
     python loom.py <dir> --talk            # read-only: nothing can be changed
     python loom.py <dir> --yes             # auto-approve writes (no diff review)
     python -m unittest discover -v         # run the test suite
@@ -24,11 +24,23 @@ completely invisible to the model: it is passed to the Workspace as a protected
 directory, so nothing in it can be listed, read, written, or searched, even when
 this repo itself is the workspace.
 
-- `config/ollama_key.txt` — your Ollama API key (sent as a Bearer token)
+- `config/ollama_config.json` — the Ollama endpoint, the default provider; the
+  file is required, because it holds the endpoint's key:
+
+    {
+      "api_key": "sk-...",
+      "base_url": "https://ollama.com",
+      "model": "glm-5.3-flash",
+      "models": ["glm-5.3", "glm-5.3-flash", "minimax-m3"]
+    }
+
+  `api_key` is required (sent as a Bearer token). `base_url` defaults to Ollama
+  Cloud (`/api/chat` is appended to the base), `model` is the default model and
+  `models` the list `/model` offers (both fall back to the catalogue in
+  `api/models.py`), and `headers` adds or overrides request headers.
 - `config/redact.json` — optionally, strings replaced with `<redacted>` in
   everything the model ever sees
-- `config/api_config.json` — for an Anthropic-compatible `/v1/messages` endpoint
-  (e.g. your workplace's own inference server); the file's presence selects it:
+- `config/anthropic_config.json` — for an Anthropic-compatible `/v1/messages` endpoint, the file's presence selects it:
 
     {
       "base_url": "https://llm.internal.example.com",

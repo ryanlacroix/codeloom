@@ -1,6 +1,6 @@
 __pycache__/
 config/
 key.txt
-ollama_key.txt
-api_config.json
+ollama_config.json
+anthropic_config.json
 .loom-temp/

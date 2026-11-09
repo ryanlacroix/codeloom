@@ -1,11 +1,18 @@
 """Tests for api.ollama_client: the translation to and from Ollama's chat API."""
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from api.http_client import APIError
 from api.models import Usage
 from api.ollama_client import (
+    OLLAMA_DEFAULT_BASE_URL,
+    OllamaClient,
+    chat_url,
     from_ollama_response,
+    load_ollama_config,
     result_text,
     to_ollama_messages,
     to_ollama_tools,
@@ -128,6 +135,108 @@ class HelpersTest(unittest.TestCase):
         self.assertEqual(
             to_ollama_tools(tools),
             [{"type": "function", "function": {"name": "read_file", "description": "d", "parameters": {"type": "object"}}}],
+        )
+
+
+class ChatUrlTest(unittest.TestCase):
+    def test_api_chat_is_appended_to_the_base(self) -> None:
+        self.assertEqual(chat_url(OLLAMA_DEFAULT_BASE_URL), "https://ollama.com/api/chat")
+        self.assertEqual(chat_url("https://ollama.example.com/"), "https://ollama.example.com/api/chat")
+
+    def test_a_base_already_named_the_endpoint_is_used_as_given(self) -> None:
+        self.assertEqual(chat_url("https://example.com/api/chat"), "https://example.com/api/chat")
+
+
+class LoadOllamaConfigTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmp.name) / "ollama_config.json"
+        self.addCleanup(self._tmp.cleanup)
+
+    def write(self, payload) -> None:
+        self.path.write_text(payload if isinstance(payload, str) else json.dumps(payload), encoding="utf-8")
+
+    def test_valid_config(self) -> None:
+        self.write(
+            {
+                "api_key": " secret ",
+                "base_url": "https://ollama.example.com/",
+                "model": "m1",
+                "models": ["m1", "m2"],
+                "headers": {"x-gateway": "v"},
+            }
+        )
+        config, error = load_ollama_config(self.path)
+        self.assertIsNone(error)
+        self.assertEqual(
+            config,
+            {
+                "api_key": "secret",
+                "base_url": "https://ollama.example.com",
+                "model": "m1",
+                "models": ["m1", "m2"],
+                "headers": {"x-gateway": "v"},
+            },
+        )
+
+    def test_base_url_defaults_to_ollama_cloud(self) -> None:
+        self.write({"api_key": "k"})
+        config, error = load_ollama_config(self.path)
+        self.assertIsNone(error)
+        self.assertEqual(config["base_url"], OLLAMA_DEFAULT_BASE_URL)
+        self.assertIsNone(config["model"])
+        self.assertNotIn("models", config)
+        self.assertNotIn("headers", config)
+
+    def test_first_models_entry_is_the_default_model(self) -> None:
+        self.write({"api_key": "k", "models": ["a", "b"]})
+        config, error = load_ollama_config(self.path)
+        self.assertIsNone(error)
+        self.assertEqual(config["model"], "a")
+
+    def test_utf8_bom_is_tolerated(self) -> None:
+        self.path.write_bytes(json.dumps({"api_key": "k"}).encode("utf-8-sig"))
+        config, error = load_ollama_config(self.path)
+        self.assertIsNone(error)
+        self.assertEqual(config["api_key"], "k")
+
+    def test_missing_file(self) -> None:
+        config, error = load_ollama_config(self.path)
+        self.assertEqual(config, {})
+        self.assertIn("No endpoint config found", error)
+
+    def test_invalid_json(self) -> None:
+        self.write("{oops")
+        config, error = load_ollama_config(self.path)
+        self.assertEqual(config, {})
+        self.assertIn("not valid JSON", error)
+
+    def test_wrong_shapes_are_reported(self) -> None:
+        for payload, note in (
+            ('["x"]', "must be a JSON object"),
+            ('{"base_url": "https://x"}', 'needs an "api_key"'),
+            ('{"api_key": ""}', 'needs an "api_key"'),
+            ('{"api_key": "k", "base_url": ""}', '"base_url" must be a non-empty string'),
+            ('{"api_key": "k", "base_url": "ollama.example.com"}', "needs its scheme"),
+            ('{"api_key": "k", "model": 3}', '"model" must be a non-empty string'),
+            ('{"api_key": "k", "models": "m"}', '"models" must be a list'),
+            ('{"api_key": "k", "models": [1]}', '"models" must be a list'),
+            ('{"api_key": "k", "headers": {"a": 1}}', '"headers" must be an object'),
+        ):
+            with self.subTest(payload=payload):
+                self.write(payload)
+                config, error = load_ollama_config(self.path)
+                self.assertEqual(config, {})
+                self.assertIn(note, error)
+
+
+class ClientTest(unittest.TestCase):
+    def test_endpoint_key_and_headers_come_from_the_config(self) -> None:
+        client = OllamaClient({"api_key": "k", "base_url": "https://x", "headers": {"x-a": "b"}})
+        self.assertEqual(client.url, "https://x/api/chat")
+        self.assertEqual(
+            client.headers,
+            {"authorization": "Bearer k", "content-type": "application/json", "x-a": "b"},
         )
 
 

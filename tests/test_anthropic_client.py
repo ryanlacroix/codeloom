@@ -182,7 +182,7 @@ class ToAnthropicMessagesTest(unittest.TestCase):
 class LoadEndpointConfigTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self.path = Path(self._tmp.name) / "api_config.json"
+        self.path = Path(self._tmp.name) / "anthropic_config.json"
         self.addCleanup(self._tmp.cleanup)
 
     def write(self, payload) -> None:
