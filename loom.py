@@ -23,11 +23,14 @@ directory is off limits too — its config and hooks are a command-execution vec
 and search never follows symlinks or reads blocked or protected files, so the walk
 cannot reach anything outside the workspace either.
 
-Auth: put your Ollama API key in ollama_key.txt, next to these scripts (sent as a Bearer
-token). The model is never allowed to read or write the key file, even if the workspace
-contains it. For an custom Anthropic-compatible /v1/messages endpoint, pass --api-config FILE: a JSON file with that endpoint's base_url
-and api_key (plus optional model, models, headers), kept outside the workspace like the key
-file — it is blocked from the model too.
+Auth: the harness reads every secret, and its own configuration, from config/ —
+a directory inside this repo that is in .gitignore and invisible to the model
+(the Workspace is given config/ as a protected directory: nothing in it can be
+listed, read, written, or searched, even when this repo is the workspace). Put
+your Ollama API key in config/ollama_key.txt (sent as a Bearer token) and, to use
+a custom Anthropic-compatible /v1/messages endpoint instead, config/api_config.json: a JSON file with that endpoint's base_url
+and api_key (plus optional model, models, headers); --api-config FILE points
+elsewhere. config/redact.json is the redaction list (see REDACT_FILE).
 
 Uses only the Python standard library; the API is called directly over HTTPS.
 """
@@ -62,18 +65,26 @@ except ImportError:
     pass
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+# The harness's configuration directory, inside this repo: the API keys, the
+# --api-config endpoint file, and the redaction list all live here. It is
+# passed to the Workspace's protected_dirs below, so nothing under it — not a
+# listing, not a read, not a write, not a search — ever reaches the model,
+# whichever directory is open as the workspace; and it is in .gitignore, so
+# the secrets stay out of git history too.
+CONFIG_DIR = SCRIPT_DIR / "config"
 # The Ollama API key file, sent to the API as a Bearer token (see the docstring).
-KEY_FILE = SCRIPT_DIR.parent / "ollama_key.txt"
+KEY_FILE = CONFIG_DIR / "ollama_key.txt"
+# The Anthropic-compatible endpoint config; its presence selects that endpoint
+# (--api-config points elsewhere), and it is read only when selected.
+API_CONFIG_FILE = CONFIG_DIR / "api_config.json"
 
 # Every text sent to the model — user input, /paste buffers, and everything the
 # tools return (file contents, search matches, listings, error notes) — passes
 # through a redaction filter (core/redact.py, applied in core/agent.py before
 # anything joins the conversation): each string in redact.json's "redactList"
-# is replaced with the "replaceWith" marker, "<redacted>" by default. Like the
-# key file it sits next to loom.py, outside the workspace, so the model can
-# neither read nor edit its own redaction list; it is also passed to the
-# Workspace's blocked list below, in case this directory is ever the
-# workspace. Read once at startup; edits need a restart.
+# is replaced with the "replaceWith" marker, "<redacted>" by default. The file
+# lives in config/ with the keys, so the model can neither read nor edit its
+# own redaction list. Read once at startup; edits need a restart.
 REDACT_FILE = "redact.json"
 
 # Slash commands typed at the "you>" prompt: each command is one small function
@@ -426,8 +437,9 @@ def main() -> None:
         type=Path,
         help="use an Anthropic-compatible /v1/messages endpoint described by this JSON file "
         "(base_url and api_key required; model, models and headers optional) instead of "
-        "Ollama Cloud. The file holds the key, so keep it outside the workspace; it is "
-        "blocked from the model",
+        "Ollama Cloud. The default is config/api_config.json next to loom.py, and that "
+        "file selects the endpoint when present; an explicitly named file must exist. "
+        "The file holds the key, so it lives in config/, hidden from the model",
     )
     parser.add_argument(
         "--think",
@@ -450,18 +462,22 @@ def main() -> None:
     parser.add_argument(
         "--redact-file",
         type=Path,
-        default=SCRIPT_DIR / REDACT_FILE,
+        default=CONFIG_DIR / REDACT_FILE,
         help=f"the strings listed under 'redactList' are replaced with the file's 'replaceWith' "
         f"marker ('<redacted>' by default) in everything sent to the model "
-        f"(default: {REDACT_FILE} next to loom.py)",
+        f"(default: {REDACT_FILE} in config/, next to loom.py)",
     )
     args = parser.parse_args()
 
     # --api-config swaps Ollama Cloud for an Anthropic-compatible /v1/messages
-    # endpoint: its file is read here, before any client exists, because its
-    # "model" is the default --model, its "models" is the /model list below, and
-    # its path goes into the Workspace's blocked list (it holds the API key).
-    # A problem with the file stops the harness here, with the loader's note.
+    # endpoint. Without the flag, the default file in config/ selects that
+    # endpoint by existing — absent, it is the normal opt-out, quiet like
+    # redaction's missing file; with the flag, the file the user named must be
+    # there (the loader's note says so). The file is read here, before any
+    # client exists, because its "model" is the default --model and its
+    # "models" is the /model list below; a problem with it stops the harness.
+    if not args.api_config and API_CONFIG_FILE.is_file():
+        args.api_config = API_CONFIG_FILE
     endpoint_config = {}
     if args.api_config:
         endpoint_config, config_error = load_endpoint_config(args.api_config)
@@ -508,11 +524,16 @@ def main() -> None:
         # resolves every blocked entry with Path.resolve(), which succeeds for a
         # file that does not exist yet, so this holds even before the first /paste
         # creates the file.
-        # redact.json is blocked like the key file, so the model can never read
-        # (and so learn to echo) or edit its own redaction list. The --api-config
-        # file is blocked for the same reason: it holds its endpoint's API key.
-        blocked=(TEMP_DIR / PASTE_FILE, args.redact_file, KEY_FILE)
+        # A --redact-file or --api-config named outside config/ is blocked the
+        # same way (its path can be anywhere the user chose); the ones in
+        # config/ need no entry, because the whole directory is protected below.
+        blocked=(TEMP_DIR / PASTE_FILE, args.redact_file)
         + ((args.api_config,) if args.api_config else ()),
+        # config/ holds the API keys and the redaction list, so it is refused
+        # outright — not listed, not readable, not writable, not searchable —
+        # wherever it sits relative to the workspace: by path, not by name, so
+        # a project's own "config" directory stays reachable.
+        protected_dirs=(CONFIG_DIR,),
     )
     # The client talks to whichever API was chosen: Ollama Cloud by default, or
     # the --api-config endpoint (whose key comes from its file, so ollama_key.txt

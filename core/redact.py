@@ -7,10 +7,11 @@ joins the conversation. Each configured string is replaced by the configured
 marker ("<redacted>" by default), so a secret appearing anywhere in the
 harness's inputs reaches neither the API nor the stored conversation history.
 
-The config lives in redact.json next to loom.py (loom.py's --redact-file moves
-it), outside the workspace: the model can neither read nor edit its own
-redaction list — the file is on the Workspace's blocked list as well, in case
-the harness's own directory is ever the workspace. It is read once at startup,
+The config lives in redact.json in the harness's config/ directory (loom.py's
+--redact-file moves it): that directory is on the Workspace's protected_dirs
+list, refused outright — not listed, not read, not written, not searched — so
+the model can neither read nor edit its own redaction list, even when the
+harness's own directory is the workspace. It is read once at startup,
 so edits take effect on the next launch.
 
 redact.json is a JSON object holding one required key and one optional:

@@ -18,13 +18,17 @@ via your editor (`/paste`), and thinking toggles.
     python loom.py <dir> --yes             # auto-approve writes (no diff review)
     python -m unittest discover -v         # run the test suite
 
-Put your Ollama API key in `ollama_key.txt` next to the harness (it is sent as a
-Bearer token). Optionally, `redact.json` next to loom.py lists strings that are
-replaced with `<redacted>` in everything the model ever sees. Plans are saved to
-`.loom-temp/plan.md`; the /paste buffer is `.loom-temp/paste.txt`.
+Every secret and the harness's own configuration live in `config/`, a directory
+inside this repo that is in `.gitignore` (so nothing lands in git history) and
+completely invisible to the model: it is passed to the Workspace as a protected
+directory, so nothing in it can be listed, read, written, or searched, even when
+this repo itself is the workspace.
 
-For an Anthropic-compatible `/v1/messages` endpoint, write its details to a JSON file of your own (kept outside this
-repo, like the key file) and start with `--api-config`:
+- `config/ollama_key.txt` — your Ollama API key (sent as a Bearer token)
+- `config/redact.json` — optionally, strings replaced with `<redacted>` in
+  everything the model ever sees
+- `config/api_config.json` — for an Anthropic-compatible `/v1/messages` endpoint
+  (e.g. your workplace's own inference server); the file's presence selects it:
 
     {
       "base_url": "https://llm.internal.example.com",
@@ -33,13 +37,13 @@ repo, like the key file) and start with `--api-config`:
       "models": ["claude-sonnet-4-5", "claude-haiku-4-5"]
     }
 
-    python loom.py <dir> --api-config /path/to/api_config.json
-
 `base_url` and `api_key` are required (`/v1/messages` is appended to the base);
 `model` is the default model (the first `models` entry if absent), `models` is
 the list `/model` offers, and `headers` adds or overrides request headers. The
-key is sent as both `x-api-key` and a Bearer token, and the file is passed to
-the Workspace's blocked list, so the model can never read it.
+key is sent as both `x-api-key` and a Bearer token. `--api-config FILE` points
+at a file kept elsewhere, and `--redact-file` overrides the redaction list's
+path the same way. Plans are saved to `.loom-temp/plan.md`; the /paste buffer is
+`.loom-temp/paste.txt`.
 
 ## Layout and dependency direction
 
@@ -72,14 +76,19 @@ loom.py is the only module that ties them together.
 ## Security model
 
 - One access rule (`Workspace._denial`): a path must resolve inside the root,
-  not be a blocked file, and not sit under a protected directory (`.git`).
-  Both `resolve()` and search's directory walk use it, so a named path and the
-  walk can never disagree.
+  not be a blocked file, and not sit under a protected directory — `.git` by
+  name, plus any whole path given in `protected_dirs`. `resolve()`, search's
+  directory walk, and list_directory's output all use it, so a named path, the
+  walk, and a listing can never disagree.
 - Symlinks are never followed by the search walk; naming one directly resolves
   it first, and one pointing outside the root is refused.
 - `.git` is protected: its config and hooks are a command-execution vector.
-- Blocked files (the API key, the `--api-config` endpoint file, redact.json, the
-  paste buffer) can never be read or written, even inside the workspace.
+- `config/` is protected by path: it holds the API keys and the redaction list,
+  so nothing in it can be listed, read, written, or searched — completely
+  invisible to the model, even when this repo is the workspace. (A project's
+  own `config` directory is unaffected; protection is by path, not name.)
+- Blocked files (a `--redact-file` or `--api-config` kept outside `config/`,
+  the paste buffer) can never be read or written, even inside the workspace.
 - Every write needs the injected approver's yes; the harness's approver shows
   a diff and flags writes to build/test entry files.
 - Console output is sanitized (`style.sanitize`): control characters a

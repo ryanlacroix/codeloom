@@ -2,8 +2,10 @@
 
 These pin the invariants the harness is built on: every path stays inside the
 root (or is refused with a reason), .git and blocked files are untouchable,
-writes require a prior read and keep encoding and line endings, and redaction
-runs before any truncation so a configured string is never shown as a fragment.
+a directory passed in protected_dirs (the harness's config/) is invisible
+to every tool, writes require a prior read and keep encoding and line endings,
+and redaction runs before any truncation so a configured string is never shown
+as a fragment.
 """
 
 import os
@@ -61,6 +63,62 @@ class ResolveTest(WorkspaceTest):
         with self.assertRaises(ToolError) as cm:
             self.ws.resolve("link.txt")
         self.assertIn("outside the project directory", str(cm.exception))
+
+
+class ProtectedDirTest(WorkspaceTest):
+    """A whole directory refused by path (the harness's config/, which holds
+    the API keys and the redaction list): nothing in it can be resolved,
+    listed, read, written, or searched — even when the workspace contains it —
+    while a directory of the same name elsewhere stays reachable."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.root / "config").mkdir()
+        (self.root / "config" / "ollama_key.txt").write_text("sk-secret\n")
+        (self.root / "a.txt").write_text("plain\n")
+        self.ws = make_workspace(self.root, protected_dirs=(self.root / "config",))
+
+    def test_the_directory_is_denied_at_any_depth(self) -> None:
+        for path in ("config", "config/ollama_key.txt", "config/sub/more.txt", "config/../config/ollama_key.txt"):
+            with self.assertRaises(ToolError) as cm:
+                self.ws.resolve(path)
+            self.assertIn("protected directory", str(cm.exception))
+
+    def test_reads_inside_the_directory_are_refused(self) -> None:
+        with self.assertRaises(ToolError) as cm:
+            self.ws.read_file("config/ollama_key.txt")
+        self.assertIn("protected directory", str(cm.exception))
+
+    def test_writes_inside_the_directory_are_refused(self) -> None:
+        for write in (
+            lambda: self.ws.write_file("config/new.txt", "x\n"),
+            lambda: self.ws.append_file("config/new.txt", "x\n"),
+        ):
+            with self.assertRaises(ToolError) as cm:
+                write()
+            self.assertIn("protected directory", str(cm.exception))
+
+    def test_the_directory_is_hidden_from_listings(self) -> None:
+        # Not merely untouchable: the name never reaches the model, and a
+        # blocked file is hidden the same way. Listing the directory itself is
+        # refused by resolve(), like naming any file inside it.
+        self.assertEqual(self.ws.list_directory("."), "a.txt")
+        with self.assertRaises(ToolError):
+            self.ws.list_directory("config")
+        blocked_ws = make_workspace(
+            self.root, protected_dirs=(self.root / "config",), blocked=(self.root / "a.txt",)
+        )
+        self.assertEqual(blocked_ws.list_directory("."), "(empty directory)")
+
+    def test_the_directory_is_never_searched(self) -> None:
+        self.assertEqual(self.ws.search("secret"), "(no matches)")
+        self.assertEqual(self.ws.search("plain", path="."), "a.txt:1: plain")
+
+    def test_a_same_named_directory_elsewhere_stays_reachable(self) -> None:
+        (self.root / "sub" / "config").mkdir(parents=True)
+        (self.root / "sub" / "config" / "settings.txt").write_text("fine\n")
+        self.assertEqual(self.ws.list_directory("sub"), "config/")
+        self.assertEqual(self.ws.read_file("sub/config/settings.txt"), "fine\n")
 
 
 class ListDirectoryTest(WorkspaceTest):

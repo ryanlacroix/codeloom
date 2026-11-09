@@ -7,9 +7,9 @@ is the wire format: the request needs the endpoint's URL and auth headers, think
 token budget rather than an on/off flag, and the reply arrives as server-sent events whose
 data lines are reassembled into the harness's response shape.
 
-The endpoint is described by a JSON file (load_endpoint_config), passed by the user with
---api-config and kept outside the workspace — it holds the API key, so loom.py also passes
-its path to the Workspace's blocked list: the model can never read it.
+The endpoint is described by a JSON file (load_endpoint_config), kept in the harness's
+config/ directory — it holds the API key, and that whole directory is passed to the
+Workspace's protected_dirs in loom.py, so the model can never list or read it.
 """
 
 import http.client
@@ -41,7 +41,8 @@ def load_endpoint_config(path: Path) -> tuple[dict, str | None]:
     """Read the --api-config JSON file, returning (config, error note).
 
     The file describes one Anthropic-compatible endpoint and holds its API key,
-    so it belongs outside the repo and the workspace, like the Ollama key file:
+    so it lives in the harness's config/ directory, which the Workspace refuses
+    outright:
 
         {
           "base_url": "https://llm.internal.example.com",

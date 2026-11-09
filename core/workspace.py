@@ -7,7 +7,8 @@ harness, a prompt showing a coloured diff of just the areas that changed — and
 a write to a file that looks executable by convention (a build or test entry
 file) carries an extra warning. Nothing
 inside a protected directory such as .git — whose config and hooks are a
-command-execution vector — can be read or written, and search never follows a
+command-execution vector — can be read or written, list_directory does not
+even show such directories, and search never follows a
 symlink, so nothing outside the workspace can be reached through the walk.
 """
 
@@ -77,6 +78,7 @@ class Workspace:
         fallback_encoding: str = "cp1252",
         blocked: tuple[Path, ...] = (),
         protected_parts: tuple[str, ...] = (".git",),
+        protected_dirs: tuple[Path, ...] = (),
         exec_risk_names: tuple[str, ...] = EXEC_RISK_NAMES,
         exec_risk_parts: tuple[str, ...] = EXEC_RISK_PARTS,
         redactor: Redactor | None = None,
@@ -98,6 +100,12 @@ class Workspace:
         # Windows '.GIT' checkout is covered: .git's config and hooks are a
         # command-execution vector if written, so the whole directory is off limits.
         self.protected_parts = frozenset(part.lower() for part in protected_parts)
+        # Whole directories, by resolved path, nothing may sit in or under: the
+        # harness's own configuration (config/, which holds the API keys and the
+        # redaction list) is denied here rather than by name in protected_parts,
+        # so an unrelated project's own "config" directory stays reachable.
+        # resolve() keeps this working even when the directory does not exist.
+        self.protected_dirs = frozenset(p.resolve() for p in protected_dirs)
         # Filenames, and parent directory components, whose writes carry the extra
         # confirmation warning (see EXEC_RISK_NAMES / EXEC_RISK_PARTS above).
         self.exec_risk_names = frozenset(name.lower() for name in exec_risk_names)
@@ -110,10 +118,12 @@ class Workspace:
         """Why a resolved path may not be touched, or None when it may be.
 
         The one access rule, shared by resolve() (which turns the reason into a
-        ToolError naming the path the model asked for) and search's directory
-        walk (which silently skips what it refuses), so the two can never drift
-        apart: the path must be the workspace root or under it, not one of the
-        blocked files, and not inside a protected directory such as .git.
+        ToolError naming the path the model asked for), search's directory
+        walk (which silently skips what it refuses), and list_directory (which
+        hides what it refuses), so the three can never drift apart: the path
+        must be the workspace root or under it, not one of the blocked files,
+        and not inside a protected directory such as .git or the harness's
+        configuration.
         """
         if resolved != self.root and self.root not in resolved.parents:
             return "outside the project directory"
@@ -121,6 +131,9 @@ class Workspace:
             return "a protected file"
         if any(part.lower() in self.protected_parts for part in resolved.relative_to(self.root).parts):
             return "inside a protected directory (git config and hooks are a command-execution vector)"
+        for directory in self.protected_dirs:
+            if resolved == directory or directory in resolved.parents:
+                return "inside a protected directory (the harness's configuration)"
         return None
 
     def resolve(self, rel_path: str) -> Path:
@@ -200,7 +213,14 @@ class Workspace:
         target = self.resolve(path)
         if not target.is_dir():
             raise ToolError(f"not a directory: {path}")
-        entries = sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name))
+        # What the access rule refuses is not shown either, so the protected
+        # directories (.git, the harness's config/) and the blocked files stay
+        # completely invisible rather than merely untouchable; each entry is
+        # resolved first, so a symlink refused by name is hidden the same way.
+        entries = sorted(
+            (e for e in target.iterdir() if self._denial(e.resolve()) is None),
+            key=lambda p: (not p.is_dir(), p.name),
+        )
         lines = [e.name + ("/" if e.is_dir() else "") for e in entries[:MAX_LIST_ENTRIES]]
         if len(entries) > MAX_LIST_ENTRIES:
             lines.append(f"... ({len(entries) - MAX_LIST_ENTRIES} more entries not shown)")
