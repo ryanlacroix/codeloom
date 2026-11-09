@@ -93,6 +93,11 @@ loom.py is the only module that ties them together.
   name, plus any whole path given in `protected_dirs`. `resolve()`, search's
   directory walk, and list_directory's output all use it, so a named path, the
   walk, and a listing can never disagree.
+- The blocked-file and protected-directory comparisons are case-insensitive,
+  like `.git`'s: a filesystem can be case-insensitive while case-preserving
+  (macOS's default, Windows), and `resolve()` keeps the spelling it was handed
+  there, so a model naming `CONFIG/ollama_config.json` must be refused by
+  spelling comparison, not left to the filesystem.
 - Symlinks are never followed by the search walk; naming one directly resolves
   it first, and one pointing outside the root is refused.
 - `.git` is protected: its config and hooks are a command-execution vector.
@@ -102,22 +107,40 @@ loom.py is the only module that ties them together.
   own `config` directory is unaffected; protection is by path, not name.)
 - Blocked files (a `--redact-file` or `--api-config` kept outside `config/`,
   the paste buffer) can never be read or written, even inside the workspace.
+- No file is ever read into memory whole above the read cap
+  (`MAX_FILE_BYTES`, 100 MB): read_file refuses it, search skips it with a
+  note, and search's walk stops collecting entries at `MAX_SEARCH_FILES`, so
+  neither a giant file nor a giant tree can exhaust memory.
+- On Windows, a path component that is a reserved device name (`CON`, `NUL`,
+  `COM1`, …) or contains a colon (an alternate-data-stream marker like
+  `file.txt:stream`) is refused: an approved write would otherwise land
+  somewhere the diff never showed.
 - Every write needs the injected approver's yes; the harness's approver shows
-  a diff and flags writes to build/test entry files.
+  a diff and flags writes to build/test entry files — and, when this repo
+  itself sits at or under the workspace, to the harness's own source files,
+  which run on the next launch.
 - Console output is sanitized (`style.sanitize`): control characters a
   terminal would act on are stripped from every model- or file-controlled
   string, and escape sequences are shown as their visible symbol (␛). Text
   sent to the API is never altered.
 - Redaction runs before any truncation (search's 200-char cap, read_file's page
-  cap), so a configured string is never shown as a partial fragment — and every
-  text that joins the conversation passes the filter.
+  cap) and before search's match itself, so a configured string is never shown
+  as a partial fragment and a search pattern can never probe one's content
+  character by character — at most a pattern matches the marker, which a
+  reported line shows anyway — and every text that joins the conversation
+  passes the filter.
 - Error text sent to the model is scrubbed of absolute paths (`scrub_paths`).
+- A tool call the API did not type-check, or any unexpected failure while
+  running one, becomes a failed tool result rather than a crash: one bad call
+  cannot end the session.
 
 ## Tests
 
 `python -m unittest discover -v` pins the sandbox invariants (containment,
-blocked and protected paths, redaction-before-truncation, encoding round-trips),
-the redaction filter, the Ollama and Anthropic message translations (the
-Anthropic one with a fake SSE stream), the agent turn loop (with a fake client),
-and the session state machine. Run them before and after any change under
-`core/` — they are the acceptance criteria for refactors.
+blocked and protected paths, case-insensitive refusal, redaction-before-
+truncation-and-match, line-number agreement, the read caps, encoding
+round-trips), the tool dispatch allowlist, the redaction filter, the Ollama
+and Anthropic message translations (the Anthropic one with a fake SSE stream),
+the agent turn loop (with a fake client, including calls the API did not
+type-check), and the session state machine. Run them before and after any
+change under `core/` — they are the acceptance criteria for refactors.

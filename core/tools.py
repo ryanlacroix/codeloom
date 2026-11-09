@@ -21,7 +21,8 @@ TOOLS = [
         "name": "read_file",
         "description": "Read a text file inside the project. A read never returns more than a 1 MB "
         "page of text: larger files are cut at a line boundary, with a note giving the line range "
-        "shown and the offset to continue from. Use offset (1-based first line) and limit (maximum "
+        "shown and the offset to continue from. A file larger than 100 MB is refused rather than "
+        "read whole. Use offset (1-based first line) and limit (maximum "
         "lines) to page through a large file; paging line numbers agree with search results. Line "
         "endings are shown as '\\n'. If the file is not UTF-8, the result starts with a note naming "
         "its encoding.",
@@ -46,7 +47,8 @@ TOOLS = [
     {
         "name": "search",
         "description": "Search file contents in the project with a regular expression, without reading "
-        "whole files; each result is 'path:line: text' for a matching line. Binary and symlinked "
+        "whole files; each result is 'path:line: text' for a matching line. Binary, oversized "
+        "(over 100 MB) and symlinked "
         "files are skipped in directory searches, protected paths such as .git are never searched, "
         "and results are capped: when the cap is reached, narrow the pattern or the path. This does "
         "not count as the read_file needed before editing a file.",
@@ -156,7 +158,9 @@ def run_tool(workspace: Workspace, name: str, tool_input: dict) -> str | list:
         return workspace.search(
             tool_input.get("pattern"),
             path=tool_input.get("path", "."),
-            ignore_case=bool(tool_input.get("ignore_case")),
+            # Passed through raw: the workspace refuses a non-boolean, where
+            # bool() here would silently turn a string like "false" into True.
+            ignore_case=tool_input.get("ignore_case", False),
             max_results=tool_input.get("max_results", 50),
         )
     if name == "write_file":

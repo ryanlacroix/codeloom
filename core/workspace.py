@@ -29,6 +29,9 @@ MAX_SEARCH_RESULT_CAP = 500     # hard ceiling for search's max_results paramete
 MAX_MATCH_CHARS = 200           # matching-line text kept per search result
 MAX_SEARCH_FILES = 5_000        # files scanned before search stops with a note
 MAX_SEARCH_BYTES = 100_000_000  # bytes scanned before search stops with a note
+MAX_FILE_BYTES = 100_000_000    # any one file larger than this is never read into memory
+                                # whole: search skips it with a note and read_file refuses
+                                # it, so one huge file in the workspace cannot exhaust memory
 
 # Writes to files that look executable by convention get an extra warning line in
 # the confirmation prompt: the file may run when the user next builds or tests.
@@ -63,6 +66,73 @@ Approver = Callable[[str, list[str], str | None], bool]
 # stay as they are instead of being rewritten as '../talk'.
 _ABS_PATH_RE = re.compile(r"""(?<![\w:/\\.-])(?:[A-Za-z]:[\\/]|[\\/])[^\s"'()<>,;]*[\\/][^\s"'()<>,;]*""")
 
+# Case-insensitive path keys, for blocked files and protected directories. A
+# filesystem can be case-insensitive while case-preserving (macOS's default
+# APFS/HFS+, Windows), and there Path.resolve() keeps the spelling it was
+# handed: exact Path comparison would let a model naming
+# 'CONFIG/ollama_config.json' or '.loom-temp/Paste.TXT' through to the very
+# files blocked and protected_dirs exist to keep it away from. normcase folds
+# '/' and case on Windows; casefold covers the rest. On a case-sensitive
+# filesystem this can only over-block a differently spelled sibling — the safe
+# direction to err in — and .git already gets the same treatment by part.
+
+
+def norm_key(path: Path) -> str:
+    """The case-insensitive spelling of a resolved path, for the sets above."""
+    return os.path.normcase(str(path)).casefold()
+
+
+def at_or_under(path_key: str, dir_key: str) -> bool:
+    """Whether one normalized path key is another, or sits under it."""
+    if path_key == dir_key:
+        return True
+    if dir_key.endswith(os.sep):  # a filesystem root, e.g. '/' or 'C:\'
+        return path_key.startswith(dir_key)
+    return path_key.startswith(dir_key + os.sep)
+
+
+def split_file_lines(text: str) -> list[str]:
+    """The lines of decoded file text, numbered the same way by every tool.
+
+    search and read_file's line window must agree on where the lines are:
+    str.splitlines() also breaks on \\r, \\f, \\v, the \\x1c-\\x1e group, \\x85
+    and the Unicode line separators, so a file holding any of them would give
+    search one numbering and read_file another, and an offset taken from a
+    search hit would land on the wrong line. Both tools therefore split here:
+    on '\\n' only, after CRLF has been normalised, with the trailing empty
+    piece dropped — the trailing newline is layout, not a line.
+    """
+    rows = text.replace("\r\n", "\n").split("\n")
+    if rows and rows[-1] == "":
+        rows.pop()
+    return rows
+
+
+# Windows reserves a handful of names as devices no matter which directory
+# names them (CON, NUL, COM1, ...), and its colon introduces an alternate data
+# stream (file.txt:stream) the approval diff would not show: an approved write
+# would land somewhere other than the file the diff described — on the console,
+# into the void (NUL), or in a hidden stream — so both are refused on Windows.
+_WINDOWS_DEVICES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 10)} | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
+def windows_name_error(parts: tuple[str, ...]) -> str | None:
+    """Why the path's components are unusable as a file name on Windows, or None.
+
+    Win32 strips trailing dots and spaces from each component and treats any
+    name whose first dot-separated piece is a device name as that device —
+    'CON.txt' included — so both spellings are covered.
+    """
+    for part in parts:
+        if ":" in part:
+            return f"'{part}' contains ':' (a Windows drive or alternate-data-stream marker)"
+        stem = part.rstrip(" .").split(".", 1)[0].upper()
+        if stem in _WINDOWS_DEVICES:
+            return f"'{part}' is a reserved Windows device name"
+    return None
+
 
 class ToolError(Exception):
     """An error reported back to the model as a failed tool result."""
@@ -89,13 +159,15 @@ class Workspace:
         self.fallback_encoding = fallback_encoding
         # The redaction filter, applied BEFORE any length cut so a configured
         # string straddling a truncation boundary is redacted whole rather than
-        # leaking its visible fragment: search redacts each matching line before
-        # its 200-char cap, and read_file's windowed read redacts the page
-        # before its 1 MB cap (which can cut mid-line). agent.py redacts every
-        # tool result a second time afterward — a harmless double pass.
+        # leaking its visible fragment: search redacts each line before both its
+        # match and its 200-char cap, and read_file's windowed read redacts the
+        # page before its 1 MB cap (which can cut mid-line). agent.py redacts
+        # every tool result a second time afterward — a harmless double pass.
         self.redactor = redactor
         # Files the model may never read or write, even inside the workspace (e.g. the key file).
-        self.blocked = {p.resolve() for p in blocked}
+        # Kept as case-insensitive keys (see norm_key): a case-preserving filesystem would
+        # resolve the spelling the model typed, so exact comparison would miss it.
+        self.blocked = frozenset(norm_key(p.resolve()) for p in blocked)
         # Path components nothing may sit in or under, compared case-insensitively so a
         # Windows '.GIT' checkout is covered: .git's config and hooks are a
         # command-execution vector if written, so the whole directory is off limits.
@@ -105,7 +177,8 @@ class Workspace:
         # redaction list) is denied here rather than by name in protected_parts,
         # so an unrelated project's own "config" directory stays reachable.
         # resolve() keeps this working even when the directory does not exist.
-        self.protected_dirs = frozenset(p.resolve() for p in protected_dirs)
+        # Kept as case-insensitive keys, like blocked above.
+        self.protected_dirs = frozenset(norm_key(p.resolve()) for p in protected_dirs)
         # Filenames, and parent directory components, whose writes carry the extra
         # confirmation warning (see EXEC_RISK_NAMES / EXEC_RISK_PARTS above).
         self.exec_risk_names = frozenset(name.lower() for name in exec_risk_names)
@@ -127,13 +200,13 @@ class Workspace:
         """
         if resolved != self.root and self.root not in resolved.parents:
             return "outside the project directory"
-        if resolved in self.blocked:
+        key = norm_key(resolved)
+        if key in self.blocked:
             return "a protected file"
         if any(part.lower() in self.protected_parts for part in resolved.relative_to(self.root).parts):
             return "inside a protected directory (git config and hooks are a command-execution vector)"
-        for directory in self.protected_dirs:
-            if resolved == directory or directory in resolved.parents:
-                return "inside a protected directory (the harness's configuration)"
+        if any(at_or_under(key, directory) for directory in self.protected_dirs):
+            return "inside a protected directory (the harness's configuration)"
         return None
 
     def resolve(self, rel_path: str) -> Path:
@@ -147,6 +220,13 @@ class Workspace:
         reason = self._denial(target)
         if reason:
             raise ToolError(f"access denied: '{rel_path}' is {reason}")
+        # Containment has settled, so the parts below are all inside the root.
+        # On Windows a reserved device name or an alternate-data-stream colon
+        # would make an approved write go somewhere the diff did not show.
+        if os.name == "nt":
+            problem = windows_name_error(target.relative_to(self.root).parts)
+            if problem:
+                raise ToolError(f"access denied: {problem}")
         return target
 
     def display(self, path: Path) -> str:
@@ -249,9 +329,11 @@ class Workspace:
         returns more than MAX_READ_BYTES of text: larger files (or pages) are
         cut at a line boundary where possible, followed by a note naming the
         line range shown and the offset to continue from, so files of any size
-        can be read in slices. Line numbers here match search results. Every
-        read records the file's encoding and line endings, so a paged read
-        also counts as the read required before editing or overwriting.
+        can be read in slices — except one larger than MAX_FILE_BYTES, which is
+        refused rather than loaded whole. Line numbers here match search
+        results. Every read records the file's encoding and line endings, so a
+        paged read also counts as the read required before editing or
+        overwriting.
         """
         if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
             raise ToolError("offset must be a non-negative integer (1-based first line to read)")
@@ -260,6 +342,15 @@ class Workspace:
         target = self.resolve(path)
         if not target.is_file():
             raise ToolError(f"not a file: {path}")
+        # No file larger than MAX_FILE_BYTES is ever loaded whole: the page and
+        # byte caps below bound what is returned, not what is read, so a giant
+        # file in the workspace needs this guard to bound memory.
+        size = target.stat().st_size
+        if size > MAX_FILE_BYTES:
+            raise ToolError(
+                f"{path} is {size:,} bytes, over the {MAX_FILE_BYTES:,}-byte cap on reading a "
+                "file whole; this file is too large to read"
+            )
         data = target.read_bytes()
         # The fallback encodings accept any bytes, so binary files must be
         # caught here rather than by a decode error.
@@ -301,9 +392,7 @@ class Workspace:
                 f"[Note: this file is encoded as {encoding}, not UTF-8. It will be saved back as "
                 f"{encoding}, so only use characters that {encoding} can represent.]"
             )
-        rows = text.replace("\r\n", "\n").split("\n")
-        if rows and rows[-1] == "":
-            rows.pop()  # the trailing newline is layout, not a line
+        rows = split_file_lines(text)
         if offset > len(rows):
             raise ToolError(
                 f"offset {offset} is past the end of the file, which has {len(rows)} lines "
@@ -359,8 +448,8 @@ class Workspace:
         directories — since the walk finds paths itself rather than being
         handed them. The protected-parts filter repeats _denial's check on
         purpose: belt and braces for the one directory whose contents must
-        never be searched. Refused entries are skipped silently; binary and
-        unreadable files are the only ones a note mentions, below.
+        never be searched. Refused entries are skipped silently; binary,
+        unreadable and oversized files are the only ones a note mentions, below.
         """
         if entry.is_symlink() or not entry.is_file():
             return False
@@ -372,13 +461,18 @@ class Workspace:
         """Regex-search file contents without reading files into the conversation.
 
         Scans files under path (default: the whole project; a single-file path
-        searches just that file) in sorted order, skips binary files (by a
-        null-byte sniff) and symlinks (a link is never followed, so nothing
-        outside the workspace can be read through the walk), and reports every
-        matching line as 'relpath:line: first 200 characters' with 1-based
-        line numbers. Stops at max_results (at most 500), or after
-        MAX_SEARCH_FILES files or MAX_SEARCH_BYTES bytes, each with a closing
-        note so the caller can narrow the search.
+        searches just that file) in sorted order — the walk stops collecting
+        entries at MAX_SEARCH_FILES, so an enormous tree is never materialised —
+        skips binary files (by a null-byte sniff), files larger than
+        MAX_FILE_BYTES (with a note), and symlinks (a link is never followed,
+        so nothing outside the workspace can be read through the walk), and
+        reports every matching line as 'relpath:line: first 200 characters'
+        with 1-based line numbers. With redaction configured, each line is
+        redacted before it is matched, so a pattern can never confirm the
+        content of a configured string (at most it matches the marker, which
+        the reported line shows anyway). Stops at max_results (at most 500),
+        or after MAX_SEARCH_FILES files or MAX_SEARCH_BYTES bytes, each with a
+        closing note so the caller can narrow the search.
         Reading this way does not count as the read_file required before
         editing a file.
         """
@@ -394,18 +488,33 @@ class Workspace:
         except re.error as e:
             raise ToolError(f"invalid pattern: {e}")
         target = self.resolve(path)
+        walk_capped = False
         if target.is_file():
             files = [target]
         elif target.is_dir():
             # Every walked entry passes _walkable: the same rule resolve()
-            # applies (containment, blocked files, .git), plus never
-            # following symlinks. Binary files are skipped by content below.
-            files = sorted(entry for entry in target.rglob("*") if self._walkable(entry))
+            # applies (containment, blocked files, .git), plus never following
+            # symlinks — on Python up to 3.12 the walk may enumerate under a
+            # directory symlink, but every entry is re-checked against that
+            # rule, so nothing outside is ever read through it. Binary files
+            # are skipped by content below. The walk stops collecting at
+            # MAX_SEARCH_FILES, so a huge tree is never materialised as one
+            # list; those collected are sorted, and the closing note below
+            # says when the walk stopped early.
+            files = []
+            for entry in target.rglob("*"):
+                if self._walkable(entry):
+                    files.append(entry)
+                    if len(files) >= MAX_SEARCH_FILES:
+                        walk_capped = True
+                        break
+            files.sort()
         else:
             raise ToolError(f"not a file or directory: {path}")
         matches: list[str] = []
         notes: list[str] = []
         skipped = 0
+        oversized = 0
         scanned_files = 0
         scanned_bytes = 0
         for file in files:
@@ -418,6 +527,12 @@ class Workspace:
                 )
                 break
             try:
+                # stat first, so a file larger than what search will ever read
+                # (a single one can exhaust the whole byte budget) is skipped
+                # rather than loaded whole.
+                if file.stat().st_size > MAX_FILE_BYTES:
+                    oversized += 1
+                    continue
                 data = file.read_bytes()
             except OSError:
                 skipped += 1
@@ -429,15 +544,21 @@ class Workspace:
             scanned_bytes += len(data)
             text, _encoding = self.decode(data)
             relative = file.relative_to(self.root).as_posix()
-            for line_no, line in enumerate(text.splitlines(), 1):
+            for line_no, line in enumerate(split_file_lines(text), 1):
+                if self.redactor:
+                    # Redact BEFORE the match, not only before the cap cut
+                    # below. Matching the raw line would hand the model a
+                    # probe: a pattern like 'sk-abc' would report whether some
+                    # file holds a secret beginning exactly that way, one
+                    # character at a time, through nothing but match-or-not.
+                    # On the redacted line such a pattern cannot match, and
+                    # the most a match can ever reveal is the marker, which a
+                    # reported line shows anyway. The cap cut below is safe on
+                    # the redacted line too: a configured string straddling it
+                    # would otherwise leak its visible fragment (a cut "<reda"
+                    # reveals nothing).
+                    line = self.redactor.redact(line)
                 if regex.search(line):
-                    if self.redactor:
-                        # Redact the full line before the cap cut below: a
-                        # configured string straddling the truncation boundary
-                        # would otherwise leak its visible fragment (a cut
-                        # "<reda" reveals nothing). The match above stays on the
-                        # raw line, so redaction never changes which lines match.
-                        line = self.redactor.redact(line)
                     cut = line[:MAX_MATCH_CHARS] + ("..." if len(line) > MAX_MATCH_CHARS else "")
                     matches.append(f"{relative}:{line_no}: {cut}")
                     if len(matches) >= result_cap:
@@ -449,6 +570,16 @@ class Workspace:
             )
         if skipped:
             notes.append(f"(skipped {skipped} binary or unreadable file{'s' if skipped != 1 else ''})")
+        if oversized:
+            notes.append(
+                f"(skipped {oversized} file{'s' if oversized != 1 else ''} larger than the "
+                f"{MAX_FILE_BYTES:,}-byte read cap)"
+            )
+        if walk_capped:
+            notes.append(
+                f"(the walk stopped at {MAX_SEARCH_FILES} files before the whole path was "
+                "listed; narrow the path to search the rest)"
+            )
         lines = matches if matches else ["(no matches)"]
         return "\n".join(lines + notes)
 
@@ -556,6 +687,12 @@ class Workspace:
         detection. The diff shown for confirmation always compares against
         what is on disk, including any edits made since the model read the file.
         """
+        size = target.stat().st_size
+        if size > MAX_FILE_BYTES:
+            raise ToolError(
+                f"{path} has grown to {size:,} bytes, over the {MAX_FILE_BYTES:,}-byte read cap, "
+                "so it is too large to read whole and cannot be edited in place"
+            )
         current = target.read_bytes()
         if b"\x00" in current:
             raise ToolError(f"{path} now looks like a binary file on disk; read it again before writing")

@@ -1,6 +1,7 @@
 """Tests for core.agent: the turn loop, the mode notes, tool dispatch, and redaction."""
 
 import unittest
+from unittest import mock
 
 from core.agent import MAX_TOKENS, Agent, cut_off_reason
 from core.redact import Redactor
@@ -131,6 +132,58 @@ class AgentTurnTest(WorkspaceTest):
         self.assertEqual(body["tools"], TOOLS)
         self.assertTrue(body["system"].startswith("You are a coding assistant"))
         self.assertIs(body["messages"], agent.messages)
+
+
+class MalformedToolCallTest(WorkspaceTest):
+    """A tool call the API did not type-check must not end the session.
+
+    Ollama does not enforce input schemas, so a null, number or missing field
+    can arrive where the schema asked for a string; every failure, expected
+    or not, becomes a failed tool result and the turn goes on.
+    """
+
+    def make_agent(self, responses: list, **kwargs) -> Agent:
+        return Agent(FakeClient(responses), self.ws, model="m", **kwargs)
+
+    def test_non_string_paths_and_patterns_become_failed_results(self) -> None:
+        agent = self.make_agent(
+            [
+                {
+                    "content": [
+                        {"type": "tool_use", "id": "t1", "name": "write_file", "input": {"path": 123, "content": "x"}},
+                        {"type": "tool_use", "id": "t2", "name": "search", "input": {"pattern": None, "path": "."}},
+                        {"type": "tool_use", "input": {"path": "."}},  # no name, no id
+                    ],
+                    "stop_reason": "tool_use",
+                },
+                {"content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn"},
+            ]
+        )
+        agent.send("go")
+        results = agent.messages[2]["content"]
+        self.assertTrue(all(result["is_error"] for result in results))
+        self.assertIn("path must be a non-empty string", results[0]["content"])
+        self.assertIn("pattern must be a non-empty string", results[1]["content"])
+        self.assertIn("unknown tool", results[2]["content"])
+        self.assertEqual(results[2]["tool_use_id"], "")
+        self.assertEqual(agent.messages[3]["content"][0]["text"], "ok")
+
+    def test_an_unexpected_error_becomes_a_failed_result(self) -> None:
+        agent = self.make_agent(
+            [
+                {
+                    "content": [{"type": "tool_use", "id": "t1", "name": "list_directory", "input": {"path": "."}}],
+                    "stop_reason": "tool_use",
+                },
+                {"content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn"},
+            ]
+        )
+        with mock.patch.object(self.ws, "list_directory", side_effect=RuntimeError("boom")):
+            agent.send("list")
+        result = agent.messages[2]["content"][0]
+        self.assertTrue(result["is_error"])
+        self.assertIn("Error: boom.", result["content"])
+        self.assertEqual(agent.messages[3]["content"][0]["text"], "ok")
 
 
 if __name__ == "__main__":

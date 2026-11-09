@@ -179,34 +179,58 @@ class Agent:
         path relative to the workspace root before the redaction filter runs.
         (ToolError text already names paths as the model asked for them, and
         scrubbing is a no-op there.)
+
+        Every failure becomes a failed result rather than an exception, and
+        that covers more than the expected ToolError and OSError: the API does
+        not guarantee the types the tool schemas ask for (Ollama leaves input
+        schemas unchecked), so a null or a number where a string was meant must
+        not end the session, and neither must an unforeseen error — the console
+        names the class for anything but ToolError and OSError, so nothing is
+        swept under the note.
         """
         tool_results = []
         for block in content:
-            if block["type"] != "tool_use":
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
                 continue
+            name = block.get("name") or ""
+            tool_use_id = block.get("id") or ""
             tool_input = block.get("input") or {}
-            if block["name"] == "search":
+            if not isinstance(tool_input, dict):
+                tool_input = {}
+            if name == "search":
                 shown_path = tool_input.get("path", ".")
-                shown = tool_input.get("pattern", "") + (f" in {shown_path}" if shown_path != "." else "")
+                shown = tool_input.get("pattern", "")
+                shown = f"{shown} in {shown_path}" if shown_path != "." else shown
             else:
                 shown = tool_input.get("path", "")
-            print(f"  {style.dim('->')} {style.tool_name(block['name'])}({style.sanitize(shown)})")
+            # The echo line is printed before the tools validate anything, and
+            # a model can hand over a non-string where the schema says string,
+            # so coerce here rather than crash: style.sanitize needs a str.
+            if not isinstance(shown, str):
+                shown = repr(shown)
+            print(f"  {style.dim('->')} {style.tool_name(name)}({style.sanitize(shown)})")
             try:
-                if self.read_only and block["name"] in WRITE_TOOLS:
+                if self.read_only and name in WRITE_TOOLS:
                     raise ToolError("writes are disabled: this message is read-only (sent with /talk or /plan)")
-                result = run_tool(self.workspace, block["name"], tool_input)
+                result = run_tool(self.workspace, name, tool_input)
                 if self.redactor:
                     result = self.redactor.redact_content(result)
-                tool_results.append({"type": "tool_result", "tool_use_id": block["id"], "content": result})
-            except (ToolError, OSError) as e:
-                print(style.error(f"     error: {e}"))
-                error_text = self.workspace.scrub_paths(f"Error: {e}. This tool call failed and changed nothing.")
+                tool_results.append({"type": "tool_result", "tool_use_id": tool_use_id, "content": result})
+            except Exception as e:
+                detail = str(e) or e.__class__.__name__
+                if isinstance(e, (ToolError, OSError)):
+                    print(style.error(f"     error: {detail}"))
+                else:
+                    print(style.error(f"     error: {detail} ({e.__class__.__name__})"))
+                error_text = self.workspace.scrub_paths(
+                    f"Error: {detail}. This tool call failed and changed nothing."
+                )
                 if self.redactor:
                     error_text = self.redactor.redact(error_text)
                 tool_results.append(
                     {
                         "type": "tool_result",
-                        "tool_use_id": block["id"],
+                        "tool_use_id": tool_use_id,
                         "content": error_text,
                         "is_error": True,
                     }

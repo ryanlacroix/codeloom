@@ -57,7 +57,7 @@ from api.http_client import APIConnectionError, APIError
 from api.models import OLLAMA_DEFAULT_MODEL, OLLAMA_MODELS
 from api.ollama_client import OllamaClient, load_ollama_config
 from core.redact import Redactor, load_redactions
-from core.workspace import Workspace
+from core.workspace import EXEC_RISK_NAMES, Workspace
 
 try:
     # Importing readline gives input() line editing (arrow keys, history).
@@ -168,6 +168,22 @@ def unknown_command_error(word: str) -> str:
     close = difflib.get_close_matches(word, sorted(COMMANDS), n=1, cutoff=0.6)
     hint = f" ~ did you mean {close[0]}?" if close else ""
     return f"command not recognized: {word}{hint} (/help for all commands)"
+
+
+def harness_source_names() -> tuple[str, ...]:
+    """The harness's own Python file names, for the exec-risk tripwire in main().
+
+    loom.py plus every module in core/, api/, ui/ and tests/: when this
+    repository itself sits at or under the workspace, those are the files the
+    user runs on the next launch (and the acceptance criteria their own tests
+    check), so a write the user approves there gets the same extra caution
+    line as a Makefile — without it, a diff that quietly removes the sandbox
+    reads like any other edit.
+    """
+    names = {entry.name for entry in SCRIPT_DIR.glob("*.py")}
+    for package in ("core", "api", "ui", "tests"):
+        names.update(entry.name for entry in (SCRIPT_DIR / package).glob("*.py"))
+    return tuple(sorted(names))
 
 
 def make_approver(auto_approve: bool):
@@ -500,6 +516,16 @@ def main() -> None:
     redaction_strings, redaction_marker, redaction_error = load_redactions(args.redact_file)
     redactor = Redactor(redaction_strings, redaction_marker)
 
+    # The write-approval tripwire list: the fixed build/test entry names, plus
+    # the harness's own source files when this repository sits at or under the
+    # workspace root — those run on the next `python loom.py`, so their writes
+    # carry the extra caution line too. Nothing is blocked; the note only makes
+    # a diff that would change the harness itself harder to skim past.
+    resolved_root = root.resolve()
+    exec_risk_names = EXEC_RISK_NAMES
+    if SCRIPT_DIR == resolved_root or resolved_root in SCRIPT_DIR.parents:
+        exec_risk_names = EXEC_RISK_NAMES + harness_source_names()
+
     workspace = Workspace(
         root,
         approver=make_approver(args.yes),
@@ -507,7 +533,9 @@ def main() -> None:
         # search and read_file redact configured strings BEFORE their length cuts
         # (search's 200-char match cap, read_file's page cap), so a secret
         # straddling a truncation boundary is never shown as a partial fragment;
-        # agent.py still redacts every tool result again afterward.
+        # search redacts each line before it is matched as well, so a pattern
+        # cannot probe a configured string's content. agent.py still redacts
+        # every tool result again afterward.
         redactor=redactor,
         # The paste buffer is off-limits to the model: it can neither read the
         # pending paste out of the harness's .loom-temp/paste.txt nor plant text
@@ -528,6 +556,7 @@ def main() -> None:
         # wherever it sits relative to the workspace: by path, not by name, so
         # a project's own "config" directory stays reachable.
         protected_dirs=(CONFIG_DIR,),
+        exec_risk_names=exec_risk_names,
     )
     # The client talks to whichever API was chosen: Ollama Cloud by default, or
     # the --api-config endpoint. Each provider's config file holds its key, and

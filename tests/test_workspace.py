@@ -10,9 +10,16 @@ as a fragment.
 
 import os
 import unittest
+from unittest import mock
 
 from core.redact import Redactor
-from core.workspace import MAX_WRITE_BYTES, ToolError, Workspace
+from core.workspace import (
+    MAX_WRITE_BYTES,
+    ToolError,
+    Workspace,
+    split_file_lines,
+    windows_name_error,
+)
 
 from tests.util import WorkspaceTest, approve_all, make_workspace
 
@@ -44,6 +51,18 @@ class ResolveTest(WorkspaceTest):
         with self.assertRaises(ToolError) as cm:
             blocked_ws.resolve("secret.txt")
         self.assertIn("a protected file", str(cm.exception))
+
+    def test_case_variant_spellings_of_blocked_files_are_denied(self) -> None:
+        # A case-insensitive filesystem resolves the spelling the model typed
+        # (Path.resolve keeps it), so exact comparison would miss the file:
+        # the key is case-insensitive instead, like .git's part check.
+        secret = self.root / "secret.txt"
+        secret.write_text("hush")
+        blocked_ws = Workspace(self.root, approver=approve_all, blocked=(secret,))
+        for name in ("SECRET.TXT", "Secret.Txt", "secret.TXT"):
+            with self.assertRaises(ToolError) as cm:
+                blocked_ws.resolve(name)
+            self.assertIn("a protected file", str(cm.exception))
 
     def test_git_directory_is_denied_at_any_depth(self) -> None:
         for path in (".git/config", "sub/.git/hooks/pre-commit", ".GIT/config"):
@@ -119,6 +138,17 @@ class ProtectedDirTest(WorkspaceTest):
         (self.root / "sub" / "config" / "settings.txt").write_text("fine\n")
         self.assertEqual(self.ws.list_directory("sub"), "config/")
         self.assertEqual(self.ws.read_file("sub/config/settings.txt"), "fine\n")
+
+    def test_case_variant_spellings_of_the_directory_are_denied(self) -> None:
+        # 'CONFIG/...' resolves to the protected directory on a case-preserving
+        # filesystem, so the comparison must not depend on spelling either.
+        # resolve() needs no existing file, so this holds on every platform.
+        for path in ("CONFIG/ollama_config.json", "Config/new.txt", "config/OLLAMA_CONFIG.json"):
+            with self.assertRaises(ToolError) as cm:
+                self.ws.resolve(path)
+            self.assertIn("protected directory", str(cm.exception))
+        with self.assertRaises(ToolError):
+            self.ws.write_file("Config/new.txt", "x\n")
 
 
 class ListDirectoryTest(WorkspaceTest):
@@ -261,6 +291,31 @@ class SearchTest(WorkspaceTest):
         line = self.ws.search("xxxxx", path="f.txt").split(": ", 1)[1]
         self.assertIn("<redacted>", line)
         self.assertNotIn("SECRET", line)
+
+    def test_search_cannot_probe_redacted_strings(self) -> None:
+        # The match runs on the redacted line: a pattern matching the secret
+        # itself, or any prefix of it, reports nothing, so match-or-no-match
+        # is not an oracle for a configured string's content.
+        (self.root / "f.txt").write_text("login abc123 now\n")
+        self.ws.redactor = Redactor(["abc123"])
+        for pattern in ("abc123", "abc12", "abc", "abc123xyz"):
+            self.assertEqual(self.ws.search(pattern), "(no matches)")
+        # A clean pattern still reports the line, with the secret redacted.
+        result = self.ws.search("login")
+        self.assertIn("f.txt:1: login <redacted> now", result)
+        self.assertNotIn("abc123", result)
+
+    def test_line_numbers_agree_between_search_and_paged_reads(self) -> None:
+        # \f and a lone \r are line breaks for str.splitlines() but not here:
+        # search and read_file must number lines identically, or an offset
+        # taken from a search hit lands on the wrong line. (The search is
+        # path-scoped: setUp's sub/b.txt also contains 'gamma'.)
+        (self.root / "f.txt").write_bytes(b"alpha\nbeta\x0cgamma\ndelta\n")
+        self.assertEqual(self.ws.search("gamma", path="f.txt"), "f.txt:2: beta\x0cgamma")
+        self.assertEqual(self.ws.read_file("f.txt", offset=2, limit=1)[-1]["text"], "beta\x0cgamma")
+        (self.root / "old.txt").write_bytes(b"one\rtwo\nthree\n")
+        self.assertEqual(self.ws.search("three", path="old.txt"), "old.txt:2: three")
+        self.assertEqual(self.ws.read_file("old.txt", offset=2), "three")
 
     def test_search_does_not_count_as_the_read_before_an_edit(self) -> None:
         self.ws.search("alpha")
@@ -445,6 +500,88 @@ class ErrorTextTest(WorkspaceTest):
         self.assertIn("may be executed", self.ws.exec_risk(self.ws.root / "venv" / "lib.py"))
         self.assertIn("may be executed", self.ws.exec_risk(self.ws.root / "node_modules" / "x.js"))
         self.assertIsNone(self.ws.exec_risk(self.ws.root / "docs" / "readme.md"))
+
+
+class BoundedReadsTest(WorkspaceTest):
+    """No file larger than the read cap (MAX_FILE_BYTES) is ever loaded whole.
+
+    The byte and page caps bound what is returned, not what is read, so the
+    size is checked before the read: search skips such files with a note,
+    read_file refuses them, and an edit into a file that has grown past the
+    cap on disk is refused too. The cap is patched small here, so no test
+    needs a huge file on disk.
+    """
+
+    def test_search_skips_oversized_files_with_a_note(self) -> None:
+        (self.root / "big.log").write_text("needle\n" + "x" * 200)
+        with mock.patch("core.workspace.MAX_FILE_BYTES", 64):
+            result = self.ws.search("needle")
+        self.assertNotIn("big.log", result)
+        self.assertIn("(no matches)", result)
+        self.assertIn("(skipped 1 file larger than the 64-byte read cap)", result)
+
+    def test_read_file_refuses_oversized_files(self) -> None:
+        (self.root / "big.log").write_text("needle\n" + "x" * 200)
+        with mock.patch("core.workspace.MAX_FILE_BYTES", 64):
+            with self.assertRaises(ToolError) as cm:
+                self.ws.read_file("big.log", offset=1, limit=1)
+            self.assertIn("over the 64-byte cap", str(cm.exception))
+
+    def test_an_edit_into_a_file_past_the_cap_is_refused(self) -> None:
+        (self.root / "f.txt").write_text("small\n")
+        self.ws.read_file("f.txt")
+        (self.root / "f.txt").write_text("grown\n" + "x" * 200)
+        with mock.patch("core.workspace.MAX_FILE_BYTES", 64):
+            with self.assertRaises(ToolError) as cm:
+                self.ws.edit_file("f.txt", "grown", "big")
+            self.assertIn("has grown to", str(cm.exception))
+
+    def test_the_walk_stops_collecting_at_the_file_cap_with_a_note(self) -> None:
+        for i in range(5):
+            (self.root / f"f{i}.txt").write_text("needle\n")
+        with mock.patch("core.workspace.MAX_SEARCH_FILES", 3):
+            result = self.ws.search("needle")
+        matched = [line for line in result.splitlines() if ":1: " in line]
+        self.assertEqual(len(matched), 3)
+        self.assertIn("(the walk stopped at 3 files", result)
+
+
+class LineSplittingTest(unittest.TestCase):
+    """split_file_lines: the one line numbering shared by search and read_file.
+
+    Only the newline breaks lines: str.splitlines() would also break on \r,
+    \f, \v and the Unicode separators, and the two tools would then disagree
+    about where the lines are.
+    """
+
+    def test_only_the_newline_breaks_lines(self) -> None:
+        self.assertEqual(split_file_lines("a\r\nb\rc\fd\ne\n"), ["a", "b\rc\x0cd", "e"])
+        self.assertEqual(split_file_lines("x"), ["x"])
+        self.assertEqual(split_file_lines(""), [])
+
+    def test_the_trailing_newline_is_layout_not_a_line(self) -> None:
+        self.assertEqual(split_file_lines("one\n\n"), ["one", ""])
+
+
+class WindowsNameTest(unittest.TestCase):
+    """windows_name_error: the device-name and alternate-stream refusals.
+
+    resolve() applies these to every path on Windows (os.name == 'nt'), where
+    naming CON, NUL or 'file.txt:stream' would make an approved write land
+    somewhere the diff did not show; the helper is tested directly so the
+    suite passes on every platform.
+    """
+
+    def test_reserved_device_names_are_refused_in_any_spelling(self) -> None:
+        for part in ("CON", "con", "NUL.txt", "COM1 ", "aux.dat."):
+            self.assertIn("reserved Windows device name", windows_name_error((part,)))
+
+    def test_colons_are_refused(self) -> None:
+        self.assertIn("alternate-data-stream", windows_name_error(("a.txt:hidden",)))
+
+    def test_ordinary_names_pass(self) -> None:
+        self.assertIsNone(windows_name_error(("readme.md", "sub", "setup.py")))
+        self.assertIsNone(windows_name_error(()))
 
 
 if __name__ == "__main__":
