@@ -190,7 +190,7 @@ class Agent:
                 shown = tool_input.get("pattern", "") + (f" in {shown_path}" if shown_path != "." else "")
             else:
                 shown = tool_input.get("path", "")
-            print(f"  {style.dim('->')} {style.tool_name(block['name'])}({shown})")
+            print(f"  {style.dim('->')} {style.tool_name(block['name'])}({style.sanitize(shown)})")
             try:
                 if self.read_only and block["name"] in WRITE_TOOLS:
                     raise ToolError("writes are disabled: this message is read-only (sent with /talk or /plan)")

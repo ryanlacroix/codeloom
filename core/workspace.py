@@ -605,5 +605,5 @@ class Workspace:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
         self.formats[target] = (encoding, newline)
-        print(f"  {style.success('✓')} {verb} {self.display(target)} ({details})")
+        print(f"  {style.success('✓')} {verb} {style.sanitize(self.display(target))} ({details})")
         return f"wrote {len(data)} bytes to {self.display(target)}, relative to the project root ({encoding})"

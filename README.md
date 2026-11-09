@@ -62,6 +62,10 @@ loom.py is the only module that ties them together.
   or written, even inside the workspace.
 - Every write needs the injected approver's yes; the harness's approver shows
   a diff and flags writes to build/test entry files.
+- Console output is sanitized (`style.sanitize`): control characters a
+  terminal would act on are stripped from every model- or file-controlled
+  string, and escape sequences are shown as their visible symbol (␛). Text
+  sent to the API is never altered.
 - Redaction runs before any truncation (search's 200-char cap, read_file's page
   cap), so a configured string is never shown as a partial fragment — and every
   text that joins the conversation passes the filter.

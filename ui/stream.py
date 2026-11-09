@@ -20,7 +20,10 @@ class StreamPrinter:
         self.markdown = None  # renderer for the open block
 
     def write(self, text: str) -> None:
-        sys.stdout.write(text)
+        # The one raw write path: everything streamed (reply and thinking text,
+        # routed here through the Markdown renderer) is sanitized, so control
+        # characters in model output cannot reach the terminal.
+        sys.stdout.write(style.sanitize(text))
         sys.stdout.flush()
 
     def start(self, kind: str, text: str) -> str:

@@ -179,7 +179,7 @@ def make_approver(auto_approve: bool):
 
     def approve(message: str, diff_lines: list[str], risk_note: str | None = None) -> bool:
         if auto_approve:
-            print(f"  {style.dim('[auto-approved]')} {message}")
+            print(f"  {style.dim('[auto-approved]')} {style.sanitize(message)}")
             if risk_note:
                 print(f"  {style.warning(risk_note)}")
             return True
