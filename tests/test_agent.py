@@ -1,0 +1,137 @@
+"""Tests for core.agent: the turn loop, the mode notes, tool dispatch, and redaction."""
+
+import unittest
+
+from core.agent import MAX_TOKENS, Agent, cut_off_reason
+from core.redact import Redactor
+from core.tools import TOOLS
+
+from tests.util import WorkspaceTest
+
+
+class FakeClient:
+    """Stands in for the API client, returning each canned response in turn."""
+
+    def __init__(self, responses: list):
+        self.responses = list(responses)
+
+    def create_message(self, body: dict, printer) -> dict:
+        return self.responses.pop(0)
+
+
+class CutOffReasonTest(unittest.TestCase):
+    def test_reasons_for_each_kind_of_cut_off(self) -> None:
+        tool_call = [{"type": "tool_use", "id": "x", "name": "n", "input": {}}]
+        self.assertIn("middle of a tool call", cut_off_reason(tool_call))
+        self.assertIn("still thinking", cut_off_reason([{"type": "thinking", "thinking": "..."}]))
+        self.assertIn("was cut off", cut_off_reason([{"type": "text", "text": "hi"}]))
+        self.assertIn("was cut off", cut_off_reason([]))
+
+
+class AgentTurnTest(WorkspaceTest):
+    def make_agent(self, responses: list, **kwargs) -> Agent:
+        return Agent(FakeClient(responses), self.ws, model="test-model", **kwargs)
+
+    def test_one_tool_round_trip(self) -> None:
+        agent = self.make_agent(
+            [
+                {
+                    "content": [{"type": "tool_use", "id": "t1", "name": "list_directory", "input": {"path": "."}}],
+                    "stop_reason": "tool_use",
+                },
+                {"content": [{"type": "text", "text": "done"}], "stop_reason": "end_turn"},
+            ]
+        )
+        agent.send("list the root")
+        self.assertEqual([m["role"] for m in agent.messages], ["user", "assistant", "user", "assistant"])
+        self.assertEqual(agent.messages[1]["content"][0]["name"], "list_directory")
+        tool_result = agent.messages[2]["content"][0]
+        self.assertEqual(tool_result["tool_use_id"], "t1")
+        self.assertEqual(tool_result["content"], "(empty directory)")
+        self.assertEqual(agent.messages[3]["content"][0]["text"], "done")
+
+    def test_read_only_messages_refuse_write_tools(self) -> None:
+        agent = self.make_agent(
+            [
+                {
+                    "content": [
+                        {"type": "tool_use", "id": "t1", "name": "write_file", "input": {"path": "x.txt", "content": "hi"}},
+                        {"type": "tool_use", "id": "t2", "name": "list_directory", "input": {"path": "."}},
+                    ],
+                    "stop_reason": "tool_use",
+                },
+                {"content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn"},
+            ]
+        )
+        agent.send("make a file", read_only=True)
+        self.assertTrue(agent.messages[0]["content"].startswith("[Read-only message:"))
+        results = agent.messages[2]["content"]
+        self.assertTrue(results[0]["is_error"])
+        self.assertIn("writes are disabled", results[0]["content"])
+        self.assertNotIn("is_error", results[1])  # the read-only tools still ran
+        self.assertEqual(results[1]["content"], "(empty directory)")
+        self.assertFalse((self.root / "x.txt").exists())
+
+    def test_plan_notes_are_prepended_by_mode(self) -> None:
+        for plan, prefix in (
+            ("start", "[Plan request:"),
+            ("update", "[Plan update:"),
+            ("approved", "[Plan approved:"),
+        ):
+            with self.subTest(plan=plan):
+                agent = self.make_agent([{"content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn"}])
+                agent.send("task", plan=plan)
+                self.assertTrue(agent.messages[0]["content"].startswith(prefix))
+
+    def test_tool_errors_become_failed_results(self) -> None:
+        agent = self.make_agent(
+            [
+                {
+                    "content": [{"type": "tool_use", "id": "t1", "name": "read_file", "input": {"path": "missing.txt"}}],
+                    "stop_reason": "tool_use",
+                },
+                {"content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn"},
+            ]
+        )
+        agent.send("read it")
+        result = agent.messages[2]["content"][0]
+        self.assertTrue(result["is_error"])
+        self.assertIn("not a file: missing.txt", result["content"])
+
+    def test_redaction_reaches_user_text_and_tool_results(self) -> None:
+        (self.root / "note.txt").write_text("SEKRET value\n")
+        agent = Agent(
+            FakeClient(
+                [
+                    {
+                        "content": [{"type": "tool_use", "id": "t1", "name": "read_file", "input": {"path": "note.txt"}}],
+                        "stop_reason": "tool_use",
+                    },
+                    {"content": [{"type": "text", "text": "done"}], "stop_reason": "end_turn"},
+                ]
+            ),
+            self.ws,
+            model="m",
+            show_thinking=False,
+            redactor=Redactor(["SEKRET"]),
+        )
+        agent.send("what is in my SEKRET note")
+        self.assertEqual(agent.messages[0]["content"], "what is in my <redacted> note")
+        result = agent.messages[2]["content"][0]["content"]
+        self.assertNotIn("SEKRET", result)
+        self.assertIn("<redacted>", result)
+
+    def test_request_body_shape(self) -> None:
+        agent = self.make_agent([])
+        agent.set_model("other-model")
+        body = agent.request_body()
+        self.assertEqual(set(body), {"model", "max_tokens", "system", "tools", "messages"})
+        self.assertEqual(body["model"], "other-model")
+        self.assertEqual(body["max_tokens"], MAX_TOKENS)
+        self.assertEqual(body["tools"], TOOLS)
+        self.assertTrue(body["system"].startswith("You are a coding assistant"))
+        self.assertIs(body["messages"], agent.messages)
+
+
+if __name__ == "__main__":
+    unittest.main()

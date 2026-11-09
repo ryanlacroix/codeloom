@@ -2,9 +2,10 @@
 
 Also handles text encodings (UTF-8, or a fallback such as cp1252) and line
 endings, so files are written back in the format they were read in. Every
-write (overwrite, edit, append) is confirmed with the user, showing a coloured
-diff of just the areas that changed; a write to a file that looks executable by
-convention (a build or test entry file) carries an extra warning. Nothing
+write (overwrite, edit, append) is confirmed by an injected approver — in the
+harness, a prompt showing a coloured diff of just the areas that changed — and
+a write to a file that looks executable by convention (a build or test entry
+file) carries an extra warning. Nothing
 inside a protected directory such as .git — whose config and hooks are a
 command-execution vector — can be read or written, and search never follows a
 symlink, so nothing outside the workspace can be reached through the walk.
@@ -13,6 +14,7 @@ symlink, so nothing outside the workspace can be reached through the walk.
 import codecs
 import os
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 from core.redact import Redactor
@@ -44,12 +46,21 @@ EXEC_RISK_NAMES = (
 )
 EXEC_RISK_PARTS = ("__pycache__", "venv", ".venv", "node_modules")
 
+# The one thing a write needs from outside the sandbox: the approver is asked
+# before the write happens, given the message, the pre-rendered diff lines,
+# and the exec-risk note (or None), and returns True to allow it. The Workspace
+# never reads input itself; loom.py injects the interactive prompt (or --yes's
+# printed note), and the tests inject whatever behavior they need.
+Approver = Callable[[str, list[str], str | None], bool]
+
 # Absolute-path tokens in error text that scrub_paths() rewrites relative to
 # the workspace root: a Windows drive letter with its separator, or a leading
 # separator — but never one embedded in a URL (every '/' of 'https://…' is
 # preceded by ':' or '/'), nor a relative path such as './api/config.py' or
-# 'core/redact.py', which do not start with a separator.
-_ABS_PATH_RE = re.compile(r"""(?<![\w:/\\.-])(?:[A-Za-z]:[\\/]|[\\/])[^\s"'()<>,;]+""")
+# 'core/redact.py', which do not start with a separator. A token must also
+# carry a second separator, so bare slash-words in prose ('/talk', '/plan')
+# stay as they are instead of being rewritten as '../talk'.
+_ABS_PATH_RE = re.compile(r"""(?<![\w:/\\.-])(?:[A-Za-z]:[\\/]|[\\/])[^\s"'()<>,;]*[\\/][^\s"'()<>,;]*""")
 
 
 class ToolError(Exception):
@@ -62,7 +73,7 @@ class Workspace:
     def __init__(
         self,
         root: Path,
-        auto_approve_writes: bool = False,
+        approver: Approver,
         fallback_encoding: str = "cp1252",
         blocked: tuple[Path, ...] = (),
         protected_parts: tuple[str, ...] = (".git",),
@@ -71,7 +82,8 @@ class Workspace:
         redactor: Redactor | None = None,
     ):
         self.root = root.resolve()
-        self.auto_approve_writes = auto_approve_writes
+        # Asked before every write; True allows it (see the Approver note above).
+        self.approver = approver
         self.fallback_encoding = fallback_encoding
         # The redaction filter, applied BEFORE any length cut so a configured
         # string straddling a truncation boundary is redacted whole rather than
@@ -562,7 +574,7 @@ class Workspace:
         verb: str,
     ) -> str:
         """Shared tail of the three write tools: size check, coloured diff,
-        user confirmation, then the write.
+        approval, then the write.
 
         old_text and new_text are already normalised to '\n'; new_text is
         saved back in the file's newline style and encoding. action names the
@@ -586,7 +598,7 @@ class Workspace:
         else:
             changes = "no line changes"
         details = f"{changes}, {len(data)} bytes, {encoding}" + (", CRLF" if newline == "\r\n" else "")
-        if not self.confirm(
+        if not self.approver(
             f"Model wants to {action} {self.display(target)} ({details}).", diff_lines, self.exec_risk(target)
         ):
             raise ToolError("the user declined this write")
@@ -595,30 +607,3 @@ class Workspace:
         self.formats[target] = (encoding, newline)
         print(f"  {style.success('✓')} {verb} {self.display(target)} ({details})")
         return f"wrote {len(data)} bytes to {self.display(target)}, relative to the project root ({encoding})"
-
-    def confirm(self, message: str, diff_lines: list[str], risk_note: str | None = None) -> bool:
-        """Ask before writing, showing a coloured diff of the changed areas.
-
-        diff_lines is the pre-rendered output of diff.render_diff; an empty
-        list means nothing changes at line level (e.g. a new empty file).
-        risk_note, when set, is a second yellow line under the question,
-        flagging a write to a file that may be executed later (a build or test
-        entry file): the diff it sits above is the user's one chance to check it.
-        """
-        if self.auto_approve_writes:
-            print(f"  {style.dim('[auto-approved]')} {message}")
-            if risk_note:
-                print(f"  {style.warning(risk_note)}")
-            return True
-        print(f"\n  {style.paint(message, style.BOLD, style.YELLOW)}")
-        if risk_note:
-            print(f"  {style.warning(risk_note)}")
-        for line in diff_lines:
-            print(f"  {style.dim('|')} {line}")
-        # Like every prompt the user types at, the question is preceded by a blank line.
-        print()
-        try:
-            answer = input(style.prompt("  Allow this write? [y/N] ", style.BOLD)).strip().lower()
-        except EOFError:
-            return False
-        return answer in ("y", "yes")

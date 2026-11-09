@@ -37,10 +37,14 @@ import os
 import stat
 import subprocess
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from ui import splash, style
 from core.agent import Agent
+from core.prompts import CONTINUE_MESSAGE
+from core.session import PASTE_FILE, TEMP_DIR, Session, Submit
 from api.http_client import APIConnectionError, APIError
 from api.models import OLLAMA_DEFAULT_MODEL, OLLAMA_MODELS
 from api.ollama_client import OllamaClient
@@ -58,66 +62,65 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # The Ollama API key file, sent to the API as a Bearer token (see the docstring).
 KEY_FILE = SCRIPT_DIR.parent / "ollama_key.txt"
 
-# Plans are saved here, in the harness's own temp directory next to loom.py, so
-# they survive restarts and can be read outside the conversation while the project
-# the model works on stays untouched. The directory sits outside the workspace,
-# so the model never sees it, and no project's .gitignore needs an entry.
-TEMP_DIR = SCRIPT_DIR / ".loom-temp"
-PLAN_FILE = "plan.md"
-
-# The /paste command creates this scratch file under TEMP_DIR and opens it in the
-# user's default text editor; its contents are quoted in front of the next message
-# submitted to the model. The path is also given to the Workspace as blocked, so
-# the model can neither read nor write the paste buffer.
-PASTE_FILE = "paste.txt"
-
-# The fixed text /continue sends, telling the model to resume a reply cut off by
-# the harness's output limit (agent.py's MAX_TOKENS). The wording is generic — no
-# number, and "response" rather than "message" — so it stays accurate whichever
-# way the reply was cut off: mid-text, mid-thinking, or when the cut-off tool
-# call meant the reply left no trace in the history at all.
-CONTINUE_MESSAGE = "Your last response was cut off by the output limit before it was finished. Continue your work, picking up where you left off."
-
 # Every text sent to the model — user input, /paste buffers, and everything the
 # tools return (file contents, search matches, listings, error notes) — passes
 # through a redaction filter (core/redact.py, applied in core/agent.py before
 # anything joins the conversation): each string in redact.json's "redactList"
 # is replaced with the "replaceWith" marker, "<redacted>" by default. Like the
-# key files it sits next to loom.py, outside the workspace, so the model can
+# key file it sits next to loom.py, outside the workspace, so the model can
 # neither read nor edit its own redaction list; it is also passed to the
 # Workspace's blocked list below, in case this directory is ever the
 # workspace. Read once at startup; edits need a restart.
 REDACT_FILE = "redact.json"
 
-# Slash commands typed at the "you>" prompt; /help lists these.
-COMMANDS = [
-    ("/help", "show this list of commands"),
-    ("/paste", "paste long text into an external editor"),
-    ("/thinking-on", "turn thinking on for all later messages"),
-    ("/thinking-off", "turn thinking off for all later messages"),
-    ("/model [name]", "list the models, or switch to <name> for later messages"),
-    ("/talk <question>", "ask the model something without any files being changed"),
-    ("/plan <task>", "propose an implementation plan for the task, changing no files"),
-    ("/ok", "approve the current plan and have the model implement it"),
-    ("/cancel", "leave plan mode without implementing the plan"),
-    ("/continue", "resume after a reply cut off by the output limit"),
-    ("/reset", "clear the conversation and start over"),
-    ("/exit", "leave the harness (also: /quit)"),
-]
+# Slash commands typed at the "you>" prompt: each command is one small function
+# below (its docstring is its /help text), registered in the COMMANDS table by
+# the @command decorator, so /help, the typo suggestion, and the dispatch in
+# main() all read from one place. A handler receives (session, args, line) —
+# line is the whole input line, word-matched, so trailing text after the
+# no-argument commands ("/exit now") is ignored rather than slipping through
+# to the model — and returns:
+#   None    handled; nothing is sent to the model, keep reading input
+#   Submit  a message to send to the model, with its plan/read-only marking
+#   EXIT    stop the loop
+# The commands that send nothing leave a pending paste pending; any Submit
+# consumes it. A new command is one function plus one decorator.
+EXIT = object()
 
-# The command words the prompt recognizes, derived from COMMANDS (the first token
-# of each entry, so "/model [name]" yields "/model") plus the /quit alias, which
-# COMMANDS mentions only inside /exit's description. Any prompt line starting with
-# "/" is a command attempt; when its first word is not one of these it is a typo
-# (/page, /jump) and is rejected without being sent to the model.
-COMMAND_WORDS = frozenset(name.split(maxsplit=1)[0] for name, _ in COMMANDS) | {"/quit"}
+
+@dataclass(frozen=True)
+class Command:
+    word: str        # what the user types: "/model"
+    usage: str       # how /help spells it: "/model [name]"
+    help: str        # the /help description, taken from the handler's docstring
+    handler: Callable
+
+
+COMMANDS: dict[str, Command] = {}
+
+
+def command(word: str, usage: str | None = None, aliases: tuple[str, ...] = ()) -> Callable:
+    """Register a prompt command handler under its word and its aliases."""
+
+    def register(handler: Callable) -> Callable:
+        entry = Command(word=word, usage=usage or word, help=handler.__doc__.strip(), handler=handler)
+        for name in (word, *aliases):
+            COMMANDS[name] = entry
+        return handler
+
+    return register
 
 
 def print_commands() -> None:
-    width = max(len(name) for name, _ in COMMANDS)
+    """The /help listing: each registered command's usage and description."""
+    entries = []
+    for entry in COMMANDS.values():  # insertion order; aliases share one entry
+        if entry not in entries:
+            entries.append(entry)
+    width = max(len(entry.usage) for entry in entries)
     print()
-    for name, what in COMMANDS:
-        print(f"  {style.bold(name.ljust(width))}  {what}")
+    for entry in entries:
+        print(f"  {style.bold(entry.usage.ljust(width))}  {entry.help}")
 
 
 def print_models(current: str) -> None:
@@ -133,26 +136,14 @@ def print_models(current: str) -> None:
 def unknown_command_error(word: str) -> str:
     """The rejection message for a prompt line whose first word is not a command.
 
-    Such a line — /page, /jump, a bare "/" — used to be sent to the model as
-    conversation text (in plan mode it would silently have revised the plan); now
-    it stops at the prompt. The nearest real command by spelling (difflib) is
-    suggested, so /page points at /paste, and the /help pointer lists them all.
+    Such a line — /page, /jump, a bare "/" — is not sent to the model as
+    conversation text (in plan mode it would silently have revised the plan).
+    The nearest real command by spelling (difflib) is suggested, so /page
+    points at /paste, and the /help pointer lists them all.
     """
-    close = difflib.get_close_matches(word, sorted(COMMAND_WORDS), n=1, cutoff=0.6)
+    close = difflib.get_close_matches(word, sorted(COMMANDS), n=1, cutoff=0.6)
     hint = f" ~ did you mean {close[0]}?" if close else ""
     return f"command not recognized: {word}{hint} (/help for all commands)"
-
-
-def thinking_suffix(agent: Agent) -> str:
-    """The prompt extra when the model's thinking is off: ' (thinking off)'.
-
-    Thinking is server-side state (client.think: on / off / a low-medium-high
-    level); /thinking-on and /thinking-off set it, and --hide-thinking merely
-    hides the stream while thinking continues, so only client.think 'off'
-    counts as off here.
-    """
-    off = agent.client.think == "off"
-    return " (thinking off)" if off else ""
 
 
 def read_key() -> str:
@@ -174,26 +165,38 @@ def read_key() -> str:
     return key
 
 
-def save_plan(agent: Agent) -> None:
-    """Save the newest plan reply to the harness's .loom-temp/plan.md.
+def make_approver(auto_approve: bool):
+    """Build the write approver the harness passes to the Workspace.
 
-    Trusted harness code writes this directly (not through the model's sandboxed
-    tools), so saving needs no approval, and the directory is created if missing.
-    The file lives next to loom.py, outside the workspace, so the project the
-    model works on is left untouched. Failures are reported but never fatal.
+    The approver is the one human control over the model's writes: it shows the
+    coloured diff of just the areas that changed and asks, or with --yes prints
+    an auto-approved note instead of asking. diff_lines is the pre-rendered
+    output of diff.render_diff; an empty list means nothing changes at line
+    level (e.g. a new empty file). risk_note, when set, flags a write to a file
+    that may be executed later (a build or test entry file): the diff it sits
+    above is the user's one chance to check it.
     """
-    text = agent.last_reply_text()
-    if not text.strip():
-        print(style.dim("  [the reply had no plan text; nothing saved]"))
-        return
-    text = text if text.endswith("\n") else text + "\n"
-    try:
-        TEMP_DIR.mkdir(parents=True, exist_ok=True)
-        (TEMP_DIR / PLAN_FILE).write_text(text, encoding="utf-8", newline="\n")
-    except OSError as e:
-        print(style.warning(f"  [could not save the plan to {TEMP_DIR / PLAN_FILE}: {e}]"))
-        return
-    print(style.dim(f"  [plan saved to {TEMP_DIR / PLAN_FILE}]"))
+
+    def approve(message: str, diff_lines: list[str], risk_note: str | None = None) -> bool:
+        if auto_approve:
+            print(f"  {style.dim('[auto-approved]')} {message}")
+            if risk_note:
+                print(f"  {style.warning(risk_note)}")
+            return True
+        print(f"\n  {style.paint(message, style.BOLD, style.YELLOW)}")
+        if risk_note:
+            print(f"  {style.warning(risk_note)}")
+        for line in diff_lines:
+            print(f"  {style.dim('|')} {line}")
+        # Like every prompt the user types at, the question is preceded by a blank line.
+        print()
+        try:
+            answer = input(style.prompt("  Allow this write? [y/N] ", style.BOLD)).strip().lower()
+        except EOFError:
+            return False
+        return answer in ("y", "yes")
+
+    return approve
 
 
 # Handles for editors launched by open_in_editor, kept here so they are never
@@ -231,6 +234,152 @@ def open_in_editor(path: Path) -> bool:
         print(style.warning(f"  [could not open an editor for {path}: {e}]"))
         return False
     return True
+
+
+@command("/help")
+def cmd_help(session, args, line):
+    """show this list of commands"""
+    print_commands()
+
+
+@command("/paste")
+def cmd_paste(session, args, line):
+    """paste long text into an external editor"""
+    # Creates a fresh empty buffer when nothing is pending and only reopens the
+    # file when something is, so an unsent draft is kept. Works while a plan is
+    # open and sends nothing to the model, so the pending paste stays pending
+    # until some message is actually submitted. Anything typed after the word is
+    # ignored.
+    path = session.open_paste()
+    if path:
+        open_in_editor(path)
+        print(style.dim(f"  [pasting into file: {path}]"))
+
+
+def _set_thinking(session, on: bool) -> None:
+    # "off" stops thinking server-side as well as hiding it; turning it back on
+    # restores the startup --think setting, which may be a level
+    # (low/medium/high) rather than plain "on". In plan mode the setting is
+    # applied and the `plan>` prompt returns with its pending plan intact.
+    # Anything typed after the command word is ignored, and nothing is sent to
+    # the model.
+    session.agent.show_thinking = on
+    session.agent.client.think = session.think if on else "off"
+    print(style.dim(f"  [thinking {'on' if on else 'off'}]"))
+
+
+@command("/thinking-on")
+def cmd_thinking_on(session, args, line):
+    """turn thinking on for all later messages"""
+    _set_thinking(session, True)
+
+
+@command("/thinking-off")
+def cmd_thinking_off(session, args, line):
+    """turn thinking off for all later messages"""
+    _set_thinking(session, False)
+
+
+@command("/model", usage="/model [name]")
+def cmd_model(session, args, line):
+    """list the models, or switch to <name> for later messages"""
+    # With no argument, list the models it can switch to (the current one
+    # marked); with a name, switch for all later messages, accepting any Ollama
+    # Cloud model name, like --model at startup. Also works while a plan is
+    # open, and nothing is sent to the model.
+    name = line[len("/model") :].strip()
+    if not name:
+        print_models(session.agent.model)
+        return
+    session.agent.set_model(name)
+    print(style.dim(f"  [model set to {name}]"))
+    if name not in OLLAMA_MODELS:
+        print(style.dim("  [not in the /model list; Ollama Cloud accepts any model name]"))
+
+
+@command("/talk", usage="/talk <question>")
+def cmd_talk(session, args, line):
+    """ask the model something without any files being changed"""
+    text = line[len("/talk") :].strip()
+    if not text:
+        print(style.dim("  [usage: /talk <question>; the model can read files but not change them]"))
+        return
+    if not args.talk:
+        # With --talk the read-only state was already announced at startup.
+        print(style.dim("  [read-only: no files will be changed]"))
+    # Never a plan update: a side question stays a side question.
+    return Submit(text, read_only=True)
+
+
+@command("/plan", usage="/plan <task>")
+def cmd_plan(session, args, line):
+    """propose an implementation plan for the task, changing no files"""
+    text = line[len("/plan") :].strip()
+    if not text:
+        print(style.dim("  [usage: /plan <task>; the model proposes a plan and changes no files]"))
+        return
+    print(style.dim("  [plan mode: the model will propose what to implement; no files will be changed]"))
+    return Submit(text, plan="start")
+
+
+@command("/ok")
+def cmd_ok(session, args, line):
+    """approve the current plan and have the model implement it"""
+    if not session.plan_mode:
+        print(style.dim("  [no plan to accept — start one with /plan <task>]"))
+        return
+    print(style.dim("  [plan approved]"))
+    return Submit("", plan="approved")  # the approval note is all the model needs
+
+
+@command("/cancel")
+def cmd_cancel(session, args, line):
+    """leave plan mode without implementing the plan"""
+    if not session.plan_mode:
+        print(style.dim("  [not in plan mode]"))
+        return
+    session.plan_mode = False
+    print(style.dim("  [plan mode off; the plan stays in the conversation]"))
+
+
+@command("/continue")
+def cmd_continue(session, args, line):
+    """resume after a reply cut off by the output limit"""
+    # The fixed nudge replaces the user text; with a plan open it revises the
+    # plan instead, and pending paste quoting, error rollback, and usage
+    # printing apply as for any message. agent.py's max_tokens handling drops
+    # any cut-off tool call first, so the history it resumes from is valid.
+    # Anything typed after the command word is ignored.
+    submit = Submit(CONTINUE_MESSAGE)
+    if session.plan_mode:
+        return session.as_plan_update(submit)
+    return submit
+
+
+@command("/reset")
+def cmd_reset(session, args, line):
+    """clear the conversation and start over"""
+    # Also clears the planning state and any pending paste, and reverts the
+    # prompt label. Anything typed after the command word is ignored.
+    session.reset()
+
+
+@command("/exit", aliases=("/quit",))
+def cmd_exit(session, args, line):
+    """leave the harness (also: /quit)"""
+    return EXIT
+
+
+def plain_submit(session, args, line) -> Submit:
+    """An ordinary (non-command) message: sent as-is, or as plan feedback while planning.
+
+    With --talk every message is read-only; while a plan is open, ordinary
+    messages are feedback that revises it (/talk stays a side question).
+    """
+    submit = Submit(line, read_only=args.talk)
+    if session.plan_mode:
+        return session.as_plan_update(submit)
+    return submit
 
 
 def main() -> None:
@@ -304,7 +453,7 @@ def main() -> None:
 
     workspace = Workspace(
         root,
-        auto_approve_writes=args.yes,
+        approver=make_approver(args.yes),
         fallback_encoding=args.fallback_encoding,
         # search and read_file redact configured strings BEFORE their length cuts
         # (search's 200-char match cap, read_file's page cap), so a secret
@@ -357,204 +506,56 @@ def main() -> None:
         print(style.dim("Start a message with /talk to ask, or /plan to get a plan to approve, without any files being changed."))
     print(style.dim("Type /help to list commands, /reset to clear the conversation, /exit to quit."))
 
-    # While a plan is being discussed (after /plan, until it is approved or abandoned),
-    # ordinary messages revise the plan instead of asking for work, write_file stays
-    # disabled, and the prompt is "plan>" to make the mode visible.
-    plan_mode = False
-
-    # Set by /paste: the next message submitted to the model gets the contents of
-    # the harness's .loom-temp/paste.txt quoted in front of it, and the flag is
-    # then consumed. While it is set the prompt reads "you (with pasted text)>".
-    # Commands that send nothing to the model leave it set; /reset clears it and
-    # reverts the prompt.
-    paste_pending = False
+    # The loop's state: the planning mode and the pending /paste buffer, with
+    # the prompt label, the plan file, and the paste quoting all owned by one
+    # place (core/session.py).
+    session = Session(agent, args.think)
 
     while True:
-        # Rebuilt every iteration so /thinking-on and /thinking-off take effect on the
-        # very next prompt.
-        suffix = thinking_suffix(agent)
         try:
             # A blank line always separates the prompt from whatever came before it
             # (the splash, a command's note, the tail of a model turn), so no other
-            # output needs to end with a blank line of its own.
+            # output needs to end with a blank line of its own. The prompt label is
+            # rebuilt every iteration so /thinking-on, /thinking-off, /plan and /ok
+            # take effect on the very next prompt.
             print()
-            if plan_mode:
-                prompt_line = style.prompt(f"plan{suffix}> ", style.BOLD, style.MAGENTA)
-            else:
-                # While a paste is pending, label the prompt so the user can see
-                # the editor buffer will be quoted in front of this message;
-                # submitting (or /reset) consumes the flag and reverts the label.
-                # thinking_suffix() parentheses compose with this one.
-                label = "you (with pasted text)" if paste_pending else "you"
-                prompt_line = style.prompt(f"{label}{suffix}> ", style.BOLD, style.GREEN)
-            user_text = input(prompt_line).strip()
+            user_text = input(session.prompt()).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
         if not user_text:
             continue
         # The first word decides. A line starting with "/" is a command attempt;
-        # if its first word matches no command — /page, /jump, a bare "/" — it is
-        # a typo, rejected here instead of being sent to the model as normal
+        # if its first word matches no command — /page, /jump, a bare "/" — it
+        # is a typo, rejected here instead of being sent to the model as normal
         # conversation text (in plan mode it would silently revise the plan).
         # The note points at /help and suggests the closest command by spelling.
         # Nothing below runs, so a pending paste stays pending.
         word = user_text.split(None, 1)[0]
-        if user_text.startswith("/") and word not in COMMAND_WORDS:
-            print(style.warning(f"  [{unknown_command_error(word)}]"))
-            continue
-        # The recognized commands are matched by first word, so trailing text
-        # after the no-argument ones ("/exit now", "/ok yes") is the command with
-        # junk after it rather than a message slipping through to the model; the
-        # argument-taking commands below strip the word and parse the rest.
-        if word in ("/exit", "/quit"):
-            break
-        if word == "/reset":
-            agent.messages = []
-            plan_mode = False
-            paste_pending = False
-            print(style.dim("  [conversation cleared]"))
-            continue
-        if word == "/help":
-            print_commands()
-            continue
-        # /thinking-on and /thinking-off toggle model thinking for all later messages,
-        # in either prompt (in plan mode the setting is applied and the `plan>` prompt
-        # returns with its pending plan intact). "off" stops thinking server-side as
-        # well as hiding it; turning it back on restores the startup --think setting,
-        # which may be a level (low/medium/high) rather than plain "on". Anything typed
-        # after the command word is ignored, and nothing is sent to the model. Handled
-        # here, before the planning state machine, like /reset and /help.
-        if word in ("/thinking-on", "/thinking-off"):
-            on = word == "/thinking-on"
-            agent.show_thinking = on
-            agent.client.think = args.think if on else "off"
-            print(style.dim(f"  [thinking {'on' if on else 'off'}]"))
-            continue
-        # /model with no argument lists the models it can switch to (the current one
-        # marked); /model <name> switches for all later messages, accepting any Ollama
-        # Cloud model name, like --model at startup. Handled here, before the planning
-        # state machine, so it also works while a plan is open, and nothing is sent
-        # to the model.
-        if word == "/model":
-            name = user_text[len("/model") :].strip()
-            if not name:
-                print_models(agent.model)
+        if user_text.startswith("/"):
+            if word not in COMMANDS:
+                print(style.warning(f"  [{unknown_command_error(word)}]"))
                 continue
-            agent.set_model(name)
-            print(style.dim(f"  [model set to {name}]"))
-            if name not in OLLAMA_MODELS:
-                print(style.dim("  [not in the /model list; Ollama Cloud accepts any model name]"))
-            continue
-
-        # /paste creates a fresh empty paste buffer in the harness's temp folder
-        # (next to loom.py, outside the workspace) and opens it in the user's
-        # default editor. Whenever the next message is actually submitted to the
-        # model, its saved contents are quoted in front of the prompt and the
-        # pending state is consumed (the hook sits just before agent.send). Like
-        # the commands above, it works while a plan is open and sends nothing to
-        # the model; anything typed after the command word is ignored. If a paste
-        # is already pending the file is only reopened, so an unsent draft is kept.
-        if word == "/paste":
-            paste_path = TEMP_DIR / PASTE_FILE
-            try:
-                paste_path.parent.mkdir(parents=True, exist_ok=True)
-                if not paste_pending:
-                    paste_path.write_bytes(b"")  # a fresh buffer for each /paste
-            except OSError as e:
-                print(style.warning(f"  [could not create {paste_path}: {e}]"))
-                continue
-            open_in_editor(paste_path)
-            paste_pending = True
-            print(style.dim(f"  [pasting into file: {paste_path}]"))
-            continue
-
-        # /continue sends a fixed nudge telling the model to resume a reply cut off
-        # by the output limit (agent.py's max_tokens handling, which drops any
-        # cut-off tool call first, so the history it resumes from is valid). The
-        # user text is replaced and the handler falls through to the ordinary send
-        # path below rather than continuing: with a plan open the planning state
-        # machine sends it as a plan update, and pending paste quoting, error
-        # rollback, and usage printing all apply as for any message. Anything
-        # typed after the command word is ignored.
-        if word == "/continue":
-            user_text = CONTINUE_MESSAGE
-
-        # Planning state machine. plan tells Agent.send what kind of message this is:
-        # "start" proposes a plan, "update" revises it, "approved" implements it.
-        plan = None
-        if word == "/ok":
-            if not plan_mode:
-                print(style.dim("  [no plan to accept — start one with /plan <task>]"))
-                continue
-            plan = "approved"
-            user_text = ""  # the approval note is all the model needs; prepended by agent.send
-            print(style.dim("  [plan approved]"))
-        elif word == "/cancel":
-            if not plan_mode:
-                print(style.dim("  [not in plan mode]"))
-                continue
-            plan_mode = False
-            print(style.dim("  [plan mode off; the plan stays in the conversation]"))
-            continue
+            result = COMMANDS[word].handler(session, args, user_text)
         else:
-            if word == "/plan":
-                user_text = user_text[len("/plan") :].strip()
-                if not user_text:
-                    print(style.dim("  [usage: /plan <task>; the model proposes a plan and changes no files]"))
-                    continue
-                plan = "start"
-                print(style.dim("  [plan mode: the model will propose what to implement; no files will be changed]"))
-            elif plan_mode and word != "/talk":
-                # Ordinary messages while planning are feedback that revises the plan;
-                # /talk stays a side question and cannot change files either.
-                plan = "update"
-                print(style.dim("  [plan mode: this message revises the plan; no files will be changed]"))
-
-        # With --talk every message is read-only; the /talk prefix makes just its
-        # message read-only. The prefix is stripped in both cases.
-        read_only = args.talk or word == "/talk"
-        if word == "/talk":
-            user_text = user_text[len("/talk") :].strip()
-            if not user_text:
-                print(style.dim("  [usage: /talk <question>; the model can read files but not change them]"))
-                continue
-            if not args.talk:
-                # With --talk the read-only state was already announced at startup.
-                print(style.dim("  [read-only: no files will be changed]"))
-
-        # The pending paste is quoted in front of the prompt at the last moment,
-        # after /talk stripping, so whatever was last saved in the editor is what
-        # the model sees. This counts as the submission for /plan, plan revisions,
-        # /ok and /talk too, and the flag is consumed before sending whatever the
-        # turn's outcome, so a failed turn does not re-paste on the next attempt.
-        if paste_pending:
-            paste_pending = False
-            try:
-                # The editor may save in a non-UTF-8 encoding; replace any bad
-                # bytes rather than losing the paste. .strip() drops editor-added
-                # leading/trailing whitespace and CRLF is already normalised.
-                paste_text = (TEMP_DIR / PASTE_FILE).read_text(encoding="utf-8", errors="replace").strip()
-            except OSError as e:
-                print(style.warning(f"  [could not read {TEMP_DIR / PASTE_FILE}: {e}]"))
-            else:
-                if paste_text:
-                    user_text = f"The user pasted this text:\n\n{paste_text}\n\n{user_text}"
-                    print(style.dim(f"  [pasted {PASTE_FILE} in front of your message]"))
-                else:
-                    print(style.dim(f"  [{TEMP_DIR / PASTE_FILE} was empty; nothing pasted]"))
-
+            result = plain_submit(session, args, user_text)
+        if result is EXIT:
+            break
+        if not isinstance(result, Submit):
+            continue
+        # The pending paste is quoted in front of the submitted text at the last
+        # moment, so whatever was last saved in the editor is what the model
+        # sees. This counts as the submission for /plan, plan revisions, /ok and
+        # /talk too, and the flag is consumed before sending whatever the turn's
+        # outcome, so a failed turn does not re-paste on the next attempt.
+        if session.paste_pending:
+            session.with_paste(result)
         history_len = len(agent.messages)
         try:
-            agent.send(user_text, read_only=read_only, plan=plan)
-            # Plan state advances only once the turn fully succeeded, so a failed or
-            # interrupted turn leaves the previous state in place.
-            if plan == "approved":
-                plan_mode = False
-            elif plan in ("start", "update"):
-                plan_mode = True
-                save_plan(agent)
-                print(style.dim("  [/ok to approve and implement the plan; anything else revises it]"))
+            agent.send(result.text, read_only=result.read_only, plan=result.plan)
+            # Plan state advances only once the turn fully succeeded, so a failed
+            # or interrupted turn leaves the previous state in place.
+            session.advance(result.plan)
         except KeyboardInterrupt:
             print("\n" + style.warning("  [interrupted]"))
             del agent.messages[history_len:]
