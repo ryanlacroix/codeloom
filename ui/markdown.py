@@ -196,6 +196,13 @@ class MarkdownStream:
             self.write("\n")
 
     def feed(self, text: str) -> None:
+        # The single entry for model-supplied text into the renderer, so it is
+        # sanitized exactly once, here — before any of the renderer's own
+        # escape codes are generated around it. StreamPrinter.write stays
+        # unsanitized: it carries those generated codes, and stripping there
+        # turns them into visible glyphs. ESC is one character, so a chunk
+        # boundary can never split a sequence this needs to see.
+        text = style.sanitize(text)
         if not style.ENABLED:
             self.write(text)
             return

@@ -51,13 +51,27 @@ class SanitizeTest(unittest.TestCase):
 
 
 class StreamPrinterTest(unittest.TestCase):
-    def test_raw_writes_cannot_wipe_the_screen(self) -> None:
+    def test_our_own_style_codes_survive_raw_writes(self) -> None:
+        # write() is trusted-internal: it carries the harness's own escape
+        # codes (labels, rules) and must not have them stripped — that
+        # stripping is what printed them as literal ␛ glyphs. Model text is
+        # sanitized one level down, where it enters the renderer (the
+        # streaming tests below).
+        printer = StreamPrinter("model", show_thinking=True)
+        # the literal output of style.dim("thinking>") with colors on
+        styled = "\x1b[2mthinking>\x1b[0m"
+        with mock.patch("sys.stdout", new=io.StringIO()) as fake:
+            printer.write(f"{styled} ")
+        self.assertEqual(fake.getvalue(), f"{styled} ")
+
+    def test_thinking_path_is_sanitized(self) -> None:
         printer = StreamPrinter("model", show_thinking=True)
         with mock.patch("sys.stdout", new=io.StringIO()) as fake:
-            printer.write("before\x1b[2Jafter\n")
+            printer.thinking("\x1b]52;c;base64payload\x07 pondering\n")
             printer.end_block()
         self.assertNotIn("\x1b", fake.getvalue())
-        self.assertIn("before␛[2Jafter", fake.getvalue())
+        self.assertIn("pondering", fake.getvalue())
+        self.assertIn("␛", fake.getvalue())
 
     def test_streamed_reply_path_is_sanitized(self) -> None:
         printer = StreamPrinter("model", show_thinking=True)

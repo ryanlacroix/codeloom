@@ -55,9 +55,11 @@ def sanitize(text: str) -> str:
     Crafted file content or model output could otherwise carry escape
     sequences that clear the screen, move the cursor, overwrite the clipboard
     (OSC 52), or right-to-left overrides that visually reorder, say, a diff.
-    Every styled print and every raw streamed write passes through here, so a
-    control a terminal would act on never reaches it. This is display-only:
-    text sent to the API and content written to files are never altered.
+    Painted strings sanitize their payload here, and the streaming renderer
+    sanitizes where the model's text enters it (MarkdownStream.feed), so a
+    control a terminal would act on never reaches the screen. This is
+    display-only: text sent to the API and content written to files are never
+    altered.
     """
     return _CONTROLS.sub(lambda match: _VISIBLE_REPLACEMENT.get(match.group(), ""), text)
 
