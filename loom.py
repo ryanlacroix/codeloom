@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A minimal, locked-down agentic coding harness for Claude or Ollama Cloud models.
+"""A minimal, locked-down agentic coding harness for Ollama Cloud models.
 
 The model gets exactly six tools, all confined to a single workspace directory:
   - list_directory: list entries in a directory
@@ -23,9 +23,9 @@ directory is off limits too — its config and hooks are a command-execution vec
 and search never follows symlinks or reads blocked or protected files, so the walk
 cannot reach anything outside the workspace either.
 
-Auth: put your Claude access token in key.txt, or your Ollama API key in ollama_key.txt,
-next to these scripts (sent as a Bearer token). The model is never allowed to read or write
-either key file, even if the workspace contains it.
+Auth: put your Ollama API key in ollama_key.txt, next to these scripts (sent as a Bearer
+token). The model is never allowed to read or write the key file, even if the workspace
+contains it.
 
 Uses only the Python standard library; the API is called directly over HTTPS.
 """
@@ -41,8 +41,8 @@ from pathlib import Path
 
 from ui import splash, style
 from core.agent import Agent
-from api.api_client import APIConnectionError, APIError, Client
-from api.models import DEFAULT_MODEL, MODELS, OLLAMA_DEFAULT_MODEL, OLLAMA_MODELS
+from api.http_client import APIConnectionError, APIError
+from api.models import OLLAMA_DEFAULT_MODEL, OLLAMA_MODELS
 from api.ollama_client import OllamaClient
 from core.redact import Redactor, load_redactions
 from core.workspace import Workspace
@@ -55,10 +55,8 @@ except ImportError:
     pass
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-KEY_FILES = {
-    "claude": (SCRIPT_DIR.parent / "key.txt", "Claude access token"),
-    "ollama": (SCRIPT_DIR.parent / "ollama_key.txt", "Ollama API key"),
-}
+# The Ollama API key file, sent to the API as a Bearer token (see the docstring).
+KEY_FILE = SCRIPT_DIR.parent / "ollama_key.txt"
 
 # Plans are saved here, in the harness's own temp directory next to loom.py, so
 # they survive restarts and can be read outside the conversation while the project
@@ -148,39 +146,32 @@ def unknown_command_error(word: str) -> str:
 def thinking_suffix(agent: Agent) -> str:
     """The prompt extra when the model's thinking is off: ' (thinking off)'.
 
-    Claude does not think at all while agent.show_thinking is False (agent.py
-    only adds the thinking config to the request when it is True), so that flag
-    alone decides. Ollama's thinking is separate server-side state (client.think:
-    on / off / a low-medium-high level), and --hide-thinking merely hides the
-    stream while thinking continues, so there only client.think 'off' counts.
-    The /thinking-on and /thinking-off commands set both flags together, so the two
-    views agree whenever a toggle happens.
+    Thinking is server-side state (client.think: on / off / a low-medium-high
+    level); /thinking-on and /thinking-off set it, and --hide-thinking merely
+    hides the stream while thinking continues, so only client.think 'off'
+    counts as off here.
     """
-    off = not agent.show_thinking if agent.priced else agent.client.think == "off"
+    off = agent.client.think == "off"
     return " (thinking off)" if off else ""
 
 
-def read_key(provider: str) -> str:
-    key_file, what = KEY_FILES[provider]
+def read_key() -> str:
+    """Read the Ollama API key, exiting with guidance when it is missing or empty."""
+    what = "Ollama API key"
     try:
-        key = key_file.read_text(encoding="utf-8").strip()
+        key = KEY_FILE.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
-        sys.exit(f"No key file found. Put your {what} in {key_file}")
+        sys.exit(f"No key file found. Put your {what} in {KEY_FILE}")
     except (OSError, UnicodeDecodeError) as e:
-        sys.exit(f"Could not read {key_file}: {e}")
+        sys.exit(f"Could not read {KEY_FILE}: {e}")
     if not key:
-        sys.exit(f"{key_file} is empty. Put your {what} in it.")
+        sys.exit(f"{KEY_FILE} is empty. Put your {what} in it.")
     # POSIX-only: Windows st_mode always reports 0666 without reflecting the
     # file's ACLs, so there the check would warn on every launch whatever the
     # real protection; on POSIX the bits mean what they say.
-    if sys.platform != "win32" and key_file.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO):
-        print(style.warning(f"Warning: {key_file} can be read by other users. Run: chmod 600 {key_file}") + "\n")
+    if sys.platform != "win32" and KEY_FILE.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+        print(style.warning(f"Warning: {KEY_FILE} can be read by other users. Run: chmod 600 {KEY_FILE}") + "\n")
     return key
-
-
-def make_client(provider: str, think: str | None) -> Client | OllamaClient:
-    key = read_key(provider)
-    return OllamaClient(key, think=think) if provider == "ollama" else Client(key)
 
 
 def save_plan(agent: Agent) -> None:
@@ -246,7 +237,7 @@ def main() -> None:
     # Clear the console before anything is printed, including argparse usage
     # errors and the key-file warning (which used to precede the splash).
     style.clear_screen()
-    parser = argparse.ArgumentParser(description="Locked-down file-only coding agent for Claude or Ollama Cloud.")
+    parser = argparse.ArgumentParser(description="Locked-down file-only coding agent for Ollama Cloud.")
     parser.add_argument("dir", help="project directory the model may access (required)")
     parser.add_argument(
         "--yes",
@@ -260,20 +251,15 @@ def main() -> None:
         help="read-only session: every message behaves like /talk, so no files can be changed",
     )
     parser.add_argument(
-        "--provider",
-        choices=sorted(KEY_FILES),
-        default="ollama",
-        help="API to connect to (default: ollama)",
-    )
-    parser.add_argument(
         "--model",
-        help=f"model to use. Claude: one of {', '.join(sorted(MODELS))} (default: {DEFAULT_MODEL}). "
-        f"Ollama: any Ollama Cloud model (default: {OLLAMA_DEFAULT_MODEL})",
+        default=OLLAMA_DEFAULT_MODEL,
+        help=f"Ollama Cloud model to use; the cloud catalogue decides what exists "
+        f"(default: {OLLAMA_DEFAULT_MODEL})",
     )
     parser.add_argument(
         "--think",
         choices=["on", "off", "low", "medium", "high"],
-        help="Ollama only: thinking for models that support it. Use a level (low/medium/high) "
+        help="thinking for models that support it. Use a level (low/medium/high) "
         "for gpt-oss models, and 'off' for models that cannot think (default: on)",
     )
     parser.add_argument(
@@ -296,15 +282,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.provider == "claude":
-        args.model = args.model or DEFAULT_MODEL
-        if args.model not in MODELS:
-            parser.error(f"unknown Claude model {args.model!r}; choose from {', '.join(sorted(MODELS))}")
-        if args.think:
-            parser.error("--think only applies to --provider ollama (Claude's reasoning is already on)")
-    else:
-        args.model = args.model or OLLAMA_DEFAULT_MODEL
-        args.think = args.think or "on"
+    args.model = args.model or OLLAMA_DEFAULT_MODEL
+    args.think = args.think or "on"
     if not args.dir.strip():
         parser.error("a project directory is required")
     root = Path(args.dir)
@@ -341,12 +320,12 @@ def main() -> None:
         # resolves every blocked entry with Path.resolve(), which succeeds for a
         # file that does not exist yet, so this holds even before the first /paste
         # creates the file.
-        # redact.json is blocked like the key files, so the model can never read
+        # redact.json is blocked like the key file, so the model can never read
         # (and so learn to echo) or edit its own redaction list.
-        blocked=(TEMP_DIR / PASTE_FILE, args.redact_file, *(path for path, _ in KEY_FILES.values())),
+        blocked=(TEMP_DIR / PASTE_FILE, args.redact_file, KEY_FILE),
     )
     agent = Agent(
-        make_client(args.provider, args.think),
+        OllamaClient(read_key(), think=args.think),
         workspace,
         model=args.model,
         show_thinking=not args.hide_thinking,
@@ -355,7 +334,7 @@ def main() -> None:
 
     splash.print_splash()
     print(f"{style.bold('Workspace:')} {workspace.root}")
-    print(f"{style.bold('Model:')}     {style.model_label(args.model)} {style.dim(f'({args.provider})')}")
+    print(f"{style.bold('Model:')}     {style.model_label(args.model)}")
     if args.think:
         print(f"{style.bold('Thinking:')}  {args.think} {style.dim('(toggle with /thinking-on, /thinking-off)')}")
     if redaction_error:
@@ -434,27 +413,22 @@ def main() -> None:
             agent.messages = []
             plan_mode = False
             paste_pending = False
-            if agent.priced:
-                print(style.dim(f"  [conversation cleared; ~${agent.session_usage.cost:.4f} spent this session]"))
-            else:
-                print(style.dim("  [conversation cleared]"))
+            print(style.dim("  [conversation cleared]"))
             continue
         if word == "/help":
             print_commands()
             continue
-        # /thinking-on and /thinking-off toggle model thinking for all later messages, in
-        # either prompt (in plan mode the setting is applied and the `plan>` prompt
-        # returns with its pending plan intact). Anything typed after the command
-        # word is ignored, and nothing is sent to the model. Handled here, before
-        # the planning state machine, like /reset and /help.
+        # /thinking-on and /thinking-off toggle model thinking for all later messages,
+        # in either prompt (in plan mode the setting is applied and the `plan>` prompt
+        # returns with its pending plan intact). "off" stops thinking server-side as
+        # well as hiding it; turning it back on restores the startup --think setting,
+        # which may be a level (low/medium/high) rather than plain "on". Anything typed
+        # after the command word is ignored, and nothing is sent to the model. Handled
+        # here, before the planning state machine, like /reset and /help.
         if word in ("/thinking-on", "/thinking-off"):
             on = word == "/thinking-on"
             agent.show_thinking = on
-            if not agent.priced:
-                # Ollama: "off" stops thinking server-side as well as hiding it, and
-                # turning it back on restores the startup --think setting, which may
-                # be a level (low/medium/high) rather than plain "on".
-                agent.client.think = args.think if on else "off"
+            agent.client.think = args.think if on else "off"
             print(style.dim(f"  [thinking {'on' if on else 'off'}]"))
             continue
         # /model with no argument lists the models it can switch to (the current one
@@ -586,7 +560,7 @@ def main() -> None:
             del agent.messages[history_len:]
         except APIError as e:
             if e.status == 401:
-                print(style.error(f"  [authentication failed: check the key in {KEY_FILES[args.provider][0]}]"))
+                print(style.error(f"  [authentication failed: check the key in {KEY_FILE}]"))
             elif e.status == 429:
                 print(style.warning("  [rate limited: wait a moment and try again]"))
             else:

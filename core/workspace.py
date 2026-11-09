@@ -53,7 +53,7 @@ _ABS_PATH_RE = re.compile(r"""(?<![\w:/\\.-])(?:[A-Za-z]:[\\/]|[\\/])[^\s"'()<>,
 
 
 class ToolError(Exception):
-    """An error reported back to Claude as a failed tool result."""
+    """An error reported back to the model as a failed tool result."""
 
 
 class Workspace:
@@ -80,7 +80,7 @@ class Workspace:
         # before its 1 MB cap (which can cut mid-line). agent.py redacts every
         # tool result a second time afterward — a harmless double pass.
         self.redactor = redactor
-        # Files Claude may never read or write, even inside the workspace (e.g. the key file).
+        # Files the model may never read or write, even inside the workspace (e.g. the key file).
         self.blocked = {p.resolve() for p in blocked}
         # Path components nothing may sit in or under, compared case-insensitively so a
         # Windows '.GIT' checkout is covered: .git's config and hooks are a
@@ -90,7 +90,7 @@ class Workspace:
         # confirmation warning (see EXEC_RISK_NAMES / EXEC_RISK_PARTS above).
         self.exec_risk_names = frozenset(name.lower() for name in exec_risk_names)
         self.exec_risk_parts = frozenset(part.lower() for part in exec_risk_parts)
-        # Encoding and line ending of each file Claude has read or written,
+        # Encoding and line ending of each file the model has read or written,
         # so writes can be saved back in the same format.
         self.formats: dict[Path, tuple[str, str]] = {}
 

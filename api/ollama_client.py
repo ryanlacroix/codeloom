@@ -1,15 +1,17 @@
 """Minimal client for Ollama Cloud's chat API, using only the standard library.
 
-The agent speaks the Claude Messages format. This client translates each
-request into Ollama's /api/chat format and translates the reply back, so the
-agent loop works unchanged with either provider.
+The harness keeps its history in a Messages-style shape (role-tagged messages
+whose content is text or typed blocks such as tool_use and tool_result). This
+client translates each request into Ollama's /api/chat format and translates
+the reply back into that shape.
 """
 
 import http.client
 import json
 import uuid
 
-from api.api_client import APIConnectionError, APIError, open_stream
+from api.http_client import APIConnectionError, APIError, open_stream
+from api.models import Usage
 
 API_URL = "https://ollama.com/api/chat"
 
@@ -31,8 +33,8 @@ def result_text(content: str | list) -> str:
     return "\n".join(block["text"] for block in content if block["type"] == "text")
 
 
-def to_ollama_messages(system: list, messages: list) -> list:
-    result = [{"role": "system", "content": "\n\n".join(block["text"] for block in system)}]
+def to_ollama_messages(system: str, messages: list) -> list:
+    result = [{"role": "system", "content": system}]
     names = tool_names_by_id(messages)
     for message in messages:
         content = message["content"]
@@ -88,7 +90,7 @@ def tool_arguments(arguments) -> dict:
 
 
 def from_ollama_response(response: dict) -> dict:
-    """Convert an /api/chat reply into the shape of a Messages API response."""
+    """Convert an /api/chat reply into the harness's response shape, usage included."""
     if "message" not in response:
         raise APIError(200, response.get("error") or "the API returned a response with no message")
     message = response["message"]
@@ -119,15 +121,15 @@ def from_ollama_response(response: dict) -> dict:
         "model": response.get("model"),
         "content": content,
         "stop_reason": stop_reason,
-        "usage": {
-            "input_tokens": response.get("prompt_eval_count") or 0,
-            "output_tokens": response.get("eval_count") or 0,
-        },
+        "usage": Usage(
+            input=response.get("prompt_eval_count") or 0,
+            output=response.get("eval_count") or 0,
+        ),
     }
 
 
 class OllamaClient:
-    """Minimal client for Ollama Cloud, accepting and returning Messages API shapes."""
+    """Minimal client for Ollama Cloud, accepting and returning the harness's shapes."""
 
     def __init__(self, api_key: str, think: str | None = None):
         # None leaves thinking to the model's default; "on" and "off" send true
@@ -141,11 +143,10 @@ class OllamaClient:
 
     def create_message(self, body: dict, printer) -> dict:
         """Stream a response, showing thinking and text through printer as they arrive,
-        and return the complete message in the shape of a Messages API response."""
-        # Claude-only fields (cache_control, output_config, thinking, fallbacks) are dropped.
+        and return the complete message in the harness's response shape."""
         request = {
             "model": body["model"],
-            "messages": to_ollama_messages(body.get("system", []), body["messages"]),
+            "messages": to_ollama_messages(body["system"], body["messages"]),
             "tools": to_ollama_tools(body.get("tools", [])),
             "stream": True,
             "options": {"num_predict": body["max_tokens"]},

@@ -4,34 +4,24 @@ import shutil
 import sys
 
 from ui import style
-from api.api_client import Client
 from ui.markdown import MarkdownStream
 from api.ollama_client import OllamaClient
-from api.models import MODELS, Usage, response_usage
+from api.models import Usage
 from core.redact import Redactor
 from core.tools import TOOLS, run_tool
 from core.workspace import ToolError, Workspace
 
 MAX_TOKENS = 16000
-# Prompt caching: the marker on the system prompt caches the tool definitions
-# and system prompt (tools come first in the request), and the top-level
-# marker caches the conversation so far. Each call then pays full price only
-# for what is new since the previous call. This only works while the history
-# is append-only, so earlier messages must never be edited.
-CACHE_CONTROL = {"type": "ephemeral"}
 
 # Tools that change files. Refused by name in read-only messages (/talk, /plan)
 # so the tool list itself can stay identical in every request.
 WRITE_TOOLS = {"write_file", "edit_file", "append_file"}
 
-# One prompt for both providers (the Claude Messages API and Ollama Cloud's GLM
-# models), so it stays provider-agnostic and sectioned in Markdown, the format
-# both model families follow well. It names every tool with its working rules
+# One prompt, sectioned in Markdown, the format Ollama Cloud's models follow
+# well. It names every tool with its working rules
 # (the full schemas travel in the request as the tool definitions, so this says
 # when to reach for each tool rather than repeating their parameters), then the
-# sandbox rules, the working method, and the reply style. It sits behind the
-# cache_control marker together with the tool definitions, so changing it here
-# invalidates the prompt cache once.
+# sandbox rules, the working method, and the reply style.
 SYSTEM_PROMPT = """You are a coding assistant working inside a single project directory. Your tools are the \
 only way you can see or change anything there: you cannot run commands, execute code, run \
 tests, install packages, or access the network. When a task would normally require running \
@@ -168,9 +158,8 @@ class StreamPrinter:
         the text to print (without leading whitespace when the block is new)."""
         if self.current == kind:
             return text
-        # The clients differ in when the previous block closes: the Claude stream
-        # sends content_block_stop between blocks, while Ollama switches from
-        # thinking to content mid-stream, so check both here and in end_block.
+        # Ollama switches from thinking to content mid-stream rather than closing
+        # the thinking block first, so check both here and in end_block.
         divider = kind == "text" and (self.current == "thinking" or self.last == "thinking")
         self.end_block()
         header = style.dim("thinking>") if kind == "thinking" else style.model_label(self.label + ">")
@@ -218,7 +207,7 @@ class StreamPrinter:
 class Agent:
     def __init__(
         self,
-        client: Client | OllamaClient,
+        client: OllamaClient,
         workspace: Workspace,
         model: str,
         show_thinking: bool = True,
@@ -232,9 +221,6 @@ class Agent:
         # below (core/redact.py); None, or an empty Redactor, sends text
         # unchanged.
         self.redactor = redactor
-        # Only Claude models have prices; Ollama Cloud is billed by subscription.
-        self.priced = model in MODELS
-        self.label = "claude" if self.priced else model
         self.show_thinking = show_thinking
         self.messages = []
         self.session_usage = Usage()
@@ -244,13 +230,10 @@ class Agent:
         """Switch the model used for later messages (/model, like --model at startup).
 
         request_body() reads self.model on every call, so the change takes effect on
-        the next message while the conversation history is kept. priced and label are
-        re-derived from the model here, exactly as in __init__.
+        the next message while the conversation history is kept, and the streamed
+        label follows it.
         """
         self.model = model
-        # Only Claude models have prices; Ollama Cloud is billed by subscription.
-        self.priced = model in MODELS
-        self.label = "claude" if self.priced else model
 
     def send(self, user_text: str, read_only: bool = False, plan: str | None = None) -> None:
         """Run one user turn, then print its token usage and estimated cost.
@@ -263,7 +246,7 @@ class Agent:
           "approved" the user accepted the plan: implement it now (writes allowed)
 
         The summary is printed even if the turn fails part-way, because the
-        API calls that did complete are still billed.
+        API calls that did complete were still sent and counted.
         """
         turn_usage = Usage()
         self.read_only = read_only or plan in ("start", "update")
@@ -287,17 +270,8 @@ class Agent:
         finally:
             self.read_only = False
             self.session_usage.add(turn_usage)
-            if (turn_usage.total_input or turn_usage.output) and self.priced:
-                print(
-                    "\n"
-                    + style.dim(
-                        f"  [{turn_usage.total_input:,} input tokens ({turn_usage.cache_read:,} from cache), "
-                        f"{turn_usage.output:,} output · ~${turn_usage.cost:.4f} this turn · "
-                        f"~${self.session_usage.cost:.4f} this session]"
-                    )
-                )
-            elif turn_usage.total_input or turn_usage.output:
-                print("\n" + style.dim(f"  [{turn_usage.total_input:,} input tokens, {turn_usage.output:,} output]"))
+            if turn_usage.input or turn_usage.output:
+                print("\n" + style.dim(f"  [{turn_usage.input:,} input tokens, {turn_usage.output:,} output]"))
 
     def last_reply_text(self) -> str:
         """The text of the newest assistant reply, without thinking or tool calls.
@@ -315,30 +289,25 @@ class Agent:
         return ""
 
     def request_body(self) -> dict:
-        body = {
+        """The body sent to the client: the model, the output limit, the system
+        prompt, the tool definitions, and the conversation so far. Thinking is
+        client-side state (OllamaClient.think), set outside the body."""
+        return {
             "model": self.model,
             "max_tokens": MAX_TOKENS,
-            "system": [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": CACHE_CONTROL}],
+            "system": SYSTEM_PROMPT,
             "tools": TOOLS,
             "messages": self.messages,
-            "output_config": {"effort": "high"},
-            "cache_control": CACHE_CONTROL,
         }
-        if self.priced and self.show_thinking:
-            # Claude returns empty thinking text unless a summary is asked for.
-            body["thinking"] = {"type": "adaptive", "display": "summarized"}
-        if self.priced and MODELS[self.model].fallbacks:
-            body["fallbacks"] = "default"
-        return body
 
     def run_turn(self, user_text: str, turn_usage: Usage) -> None:
         self.messages.append({"role": "user", "content": user_text})
         while True:
             # A fresh printer per API call: the rule only divides a tool-free
             # thinking block from the reply streamed in the same response.
-            printer = StreamPrinter(self.label, self.show_thinking)
+            printer = StreamPrinter(self.model, self.show_thinking)
             response = self.client.create_message(self.request_body(), printer)
-            turn_usage.add(response_usage(response, self.model))
+            turn_usage.add(response.get("usage") or Usage())
             content = response.get("content", [])
             stop_reason = response.get("stop_reason")
             # Append the full content (including thinking blocks) unchanged.

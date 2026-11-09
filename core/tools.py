@@ -1,4 +1,4 @@
-"""The tools Claude may call. Anything not listed here is refused."""
+"""The tools the model may call. Anything not listed here is refused."""
 
 from core.workspace import ToolError, Workspace
 
