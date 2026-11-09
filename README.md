@@ -40,7 +40,7 @@ this repo itself is the workspace.
   `api/models.py`), and `headers` adds or overrides request headers.
 - `config/redact.json` — optionally, strings replaced with `<redacted>` in
   everything the model ever sees
-- `config/anthropic_config.json` — for an Anthropic-compatible `/v1/messages` endpoint, the file's presence selects it:
+- `config/anthropic_config.json` — an Anthropic-compatible `/v1/messages` endpoint, selected only by `--api-config` (normally this file); the shape:
 
     {
       "base_url": "https://llm.internal.example.com",
@@ -52,7 +52,8 @@ this repo itself is the workspace.
 `base_url` and `api_key` are required (`/v1/messages` is appended to the base);
 `model` is the default model (the first `models` entry if absent), `models` is
 the list `/model` offers, and `headers` adds or overrides request headers. The
-key is sent as both `x-api-key` and a Bearer token. `--api-config FILE` points
+key is sent as both `x-api-key` and a Bearer token. Only `--api-config FILE`
+selects this endpoint — the file's presence alone does nothing. `FILE` points
 at a file kept elsewhere, and `--redact-file` overrides the redaction list's
 path the same way. Plans are saved to `.loom-temp/plan.md`; the /paste buffer is
 `.loom-temp/paste.txt`.

@@ -30,10 +30,10 @@ listed, read, written, or searched, even when this repo is the workspace). The
 provider is Ollama by default, configured by config/ollama_config.json: a JSON
 file holding that endpoint's api_key (required — the only key source), plus
 optional base_url, model, models, headers. To use a custom Anthropic-compatible
-/v1/messages endpoint instead, config/anthropic_config.json: the same shape,
-with base_url and api_key required — that file's presence (or --api-config FILE
-pointing at another one) selects the endpoint. config/redact.json is the
-redaction list (see REDACT_FILE).
+/v1/messages endpoint instead, pass --api-config FILE: the file (config/
+anthropic_config.json is the conventional place) has the same shape, with
+base_url and api_key required, and only the flag selects the endpoint.
+config/redact.json is the redaction list (see REDACT_FILE).
 
 Uses only the Python standard library; the API is called directly over HTTPS.
 """
@@ -76,10 +76,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_DIR = SCRIPT_DIR / "config"
 # Each endpoint is described by a JSON file here that holds its key (see the
 # docstring). Ollama is the default provider and its file is required; the
-# Anthropic-compatible endpoint's file is optional — its presence (or
-# --api-config pointing elsewhere) selects that endpoint instead.
+# Anthropic-compatible endpoint runs only when --api-config names its file.
 OLLAMA_CONFIG_FILE = CONFIG_DIR / "ollama_config.json"
-ANTHROPIC_CONFIG_FILE = CONFIG_DIR / "anthropic_config.json"
 
 # Every text sent to the model — user input, /paste buffers, and everything the
 # tools return (file contents, search matches, listings, error notes) — passes
@@ -420,10 +418,10 @@ def main() -> None:
         type=Path,
         help="use an Anthropic-compatible /v1/messages endpoint described by this JSON file "
         "(base_url and api_key required; model, models and headers optional) instead of "
-        "Ollama Cloud, the default provider. The default is config/anthropic_config.json "
-        "next to loom.py, and that file selects the endpoint when present; an explicitly "
-        "named file must exist. The file holds the key, so it lives in config/, hidden "
-        "from the model",
+        "Ollama Cloud, the default provider, which only this flag can override: "
+        "config/anthropic_config.json existing next to loom.py selects nothing. "
+        "The named file must exist. The file holds the key, so it lives in "
+        "config/, hidden from the model",
     )
     parser.add_argument(
         "--think",
@@ -454,17 +452,14 @@ def main() -> None:
     args = parser.parse_args()
 
     # The provider: Ollama by default, or the Anthropic-compatible /v1/messages
-    # endpoint when --api-config names a file — or the default
-    # config/anthropic_config.json exists. Both providers are described by a
+    # endpoint only when --api-config names a file — anthropic_config.json's
+    # mere presence selects nothing. Both providers are described by a
     # JSON file in config/ that also holds the key, so the Ollama file is
-    # required (there is no other key source), while the Anthropic one is the
-    # quiet opt-in, like redaction's missing file; with the flag, the file the
+    # required (there is no other key source); with the flag, the file the
     # user named must be there (the loader's note says so). Each file is read
     # here, before any client exists, because its "model" is the default
     # --model and its "models" the /model list below; a problem with it stops
     # the harness.
-    if not args.api_config and ANTHROPIC_CONFIG_FILE.is_file():
-        args.api_config = ANTHROPIC_CONFIG_FILE
     endpoint_config = {}
     if args.api_config:
         endpoint_config, config_error = load_endpoint_config(args.api_config)
