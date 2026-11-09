@@ -1,7 +1,8 @@
 # CodeLoom
 
-A minimal, locked-down agentic coding harness for Ollama Cloud models, written
-with only the Python standard library.
+A minimal, locked-down agentic coding harness for Ollama Cloud models — or any
+Anthropic-compatible `/v1/messages` endpoint via `--api-config` — written with only
+the Python standard library.
 
 The model gets six file tools (list_directory, read_file, search, write_file,
 edit_file, append_file), all confined to one workspace directory — and nothing
@@ -22,6 +23,24 @@ Bearer token). Optionally, `redact.json` next to loom.py lists strings that are
 replaced with `<redacted>` in everything the model ever sees. Plans are saved to
 `.loom-temp/plan.md`; the /paste buffer is `.loom-temp/paste.txt`.
 
+For an Anthropic-compatible `/v1/messages` endpoint, write its details to a JSON file of your own (kept outside this
+repo, like the key file) and start with `--api-config`:
+
+    {
+      "base_url": "https://llm.internal.example.com",
+      "api_key": "sk-...",
+      "model": "claude-sonnet-4-5",
+      "models": ["claude-sonnet-4-5", "claude-haiku-4-5"]
+    }
+
+    python loom.py <dir> --api-config /path/to/api_config.json
+
+`base_url` and `api_key` are required (`/v1/messages` is appended to the base);
+`model` is the default model (the first `models` entry if absent), `models` is
+the list `/model` offers, and `headers` adds or overrides request headers. The
+key is sent as both `x-api-key` and a Bearer token, and the file is passed to
+the Workspace's blocked list, so the model can never read it.
+
 ## Layout and dependency direction
 
     loom.py            the entry point and composition root: argparse, key and
@@ -36,6 +55,7 @@ replaced with `<redacted>` in everything the model ever sees. Plans are saved to
     api/
       http_client.py   shared HTTP plumbing: errors, retries, the streaming POST
       ollama_client.py the Ollama Cloud chat API client
+      anthropic_client.py the Anthropic-compatible /v1/messages client and its config loader
       models.py        the model names and the Usage token counts
     ui/
       style.py         colors, prompt painting, the console clear
@@ -58,8 +78,8 @@ loom.py is the only module that ties them together.
 - Symlinks are never followed by the search walk; naming one directly resolves
   it first, and one pointing outside the root is refused.
 - `.git` is protected: its config and hooks are a command-execution vector.
-- Blocked files (the API key, redact.json, the paste buffer) can never be read
-  or written, even inside the workspace.
+- Blocked files (the API key, the `--api-config` endpoint file, redact.json, the
+  paste buffer) can never be read or written, even inside the workspace.
 - Every write needs the injected approver's yes; the harness's approver shows
   a diff and flags writes to build/test entry files.
 - Console output is sanitized (`style.sanitize`): control characters a
@@ -75,6 +95,7 @@ loom.py is the only module that ties them together.
 
 `python -m unittest discover -v` pins the sandbox invariants (containment,
 blocked and protected paths, redaction-before-truncation, encoding round-trips),
-the redaction filter, the Ollama message translation, the agent turn loop (with
-a fake client), and the session state machine. Run them before and after any
-change under `core/` — they are the acceptance criteria for refactors.
+the redaction filter, the Ollama and Anthropic message translations (the
+Anthropic one with a fake SSE stream), the agent turn loop (with a fake client),
+and the session state machine. Run them before and after any change under
+`core/` — they are the acceptance criteria for refactors.

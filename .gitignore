@@ -1,4 +1,5 @@
 __pycache__/
 key.txt
 ollama_key.txt
+api_config.json
 .loom-temp/
