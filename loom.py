@@ -170,7 +170,10 @@ def read_key(provider: str) -> str:
         sys.exit(f"Could not read {key_file}: {e}")
     if not key:
         sys.exit(f"{key_file} is empty. Put your {what} in it.")
-    if key_file.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+    # POSIX-only: Windows st_mode always reports 0666 without reflecting the
+    # file's ACLs, so there the check would warn on every launch whatever the
+    # real protection; on POSIX the bits mean what they say.
+    if sys.platform != "win32" and key_file.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO):
         print(style.warning(f"Warning: {key_file} can be read by other users. Run: chmod 600 {key_file}") + "\n")
     return key
 
