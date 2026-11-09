@@ -20,10 +20,11 @@ ART = r""" ⡎⠑ ⢀⡀ ⢀⣸ ⢀⡀ ⡇  ⢀⡀ ⢀⡀ ⣀⣀  ⡠⡠
 
 
 def print_splash() -> None:
-    """Print the title art centered in the terminal, bold cyan, then a blank
-    line; nothing if colors are off."""
+    """Print a blank line, then the title art centered in the terminal, bold
+    cyan, then another blank line; nothing if colors are off."""
     if not style.colors_enabled():
         return
+    print()
     lines = ART.splitlines()
     # The braille dot glyphs are single-cell in terminals, so len() gives the
     # display width. get_terminal_size() falls back to COLUMNS or 80 when
