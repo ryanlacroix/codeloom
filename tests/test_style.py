@@ -1,12 +1,17 @@
-"""Tests for ui.style.sanitize: control characters never reach the console.
+"""Tests for ui.style: the sanitize choke points, and the color gate.
 
 Model-controlled text reaches the terminal in the approval diff, in tool-call
-and error lines, and in the streamed reply. These tests pin that ESC, other
-C0 controls, C1 controls, and bidi overrides are neutralized at the choke
+and error lines, and in the streamed reply. The sanitize tests pin that ESC,
+other C0 controls, C1 controls, and bidi overrides are neutralized at the choke
 points — while normal text (and the harness's own style codes) are untouched.
+The color-gate tests pin colors_enabled(): the NO_COLOR/FORCE_COLOR switches,
+the terminal check, and the Windows console's ANSI-mode switch, run against a
+fake windll so every Windows leg executes on any development platform.
 """
 
+import ctypes
 import io
+import os
 import unittest
 from unittest import mock
 
@@ -82,6 +87,90 @@ class StreamPrinterTest(unittest.TestCase):
         self.assertNotIn("\x1b", out)
         self.assertIn("there", out)
         self.assertIn("␛", out)
+
+
+class ColorGateTest(unittest.TestCase):
+    """colors_enabled(): the env switches, the terminal check, the Windows ANSI switch.
+
+    The Windows decision is a mode bit on the console itself
+    (ENABLE_VIRTUAL_TERMINAL_PROCESSING), probed directly through kernel32 — so the
+    Windows scenarios here run with a fake windll patched over ctypes.windll (which
+    exists only on Windows itself), pinning the outcomes on any development
+    platform: a console that accepts the switch gets colors, whether it is the
+    classic console host behind PowerShell/cmd, Windows Terminal or the VS Code
+    terminal; anything that refuses it, has no console behind stdout, or has no
+    kernel32 to ask stays plain text; ConEmu and ANSICON translate the codes
+    themselves and get colors with nothing to flip.
+    """
+
+    def gate(self, env: dict | None = None, isatty: bool = False, windll=None, platform: str = "win32") -> bool:
+        """Run colors_enabled() under a controlled environment, stdout, and windll."""
+        # The blanks neutralize ambient values that would otherwise decide a branch;
+        # the caller's env (merged after them) overrides any of these keys.
+        switches = {"NO_COLOR": "", "FORCE_COLOR": "", "ANSICON": "", "ConEmuANSI": "", "TERM": "", **(env or {})}
+        stdout = mock.MagicMock()
+        stdout.isatty.return_value = isatty
+        with mock.patch.dict(os.environ, switches), \
+                mock.patch("sys.stdout", new=stdout), \
+                mock.patch("sys.platform", platform), \
+                mock.patch.object(ctypes, "windll", windll, create=True):
+            return style.colors_enabled()
+
+    @staticmethod
+    def windll(getmode: int = 1, setmode: int = 1):
+        """A fake windll whose console reports itself (getmode) and accepts (setmode=1)
+        or refuses (setmode=0) the ANSI switch. .kernel32 stays inspectable."""
+        api = mock.MagicMock()
+        api.GetConsoleMode.return_value = getmode
+        api.SetConsoleMode.return_value = setmode
+        return mock.Mock(kernel32=api)
+
+    def test_no_color_wins_over_everything(self) -> None:
+        self.assertFalse(self.gate(env={"NO_COLOR": "1", "FORCE_COLOR": "1"}, isatty=True, windll=self.windll()))
+
+    def test_no_color_without_a_terminal(self) -> None:
+        self.assertFalse(self.gate(env={"NO_COLOR": "1"}))
+
+    def test_force_color_overrides_a_non_terminal(self) -> None:
+        # FORCE_COLOR is an explicit ask; the user chooses what stdout points at.
+        self.assertTrue(self.gate(env={"FORCE_COLOR": "1"}))
+
+    def test_no_colors_without_a_terminal(self) -> None:
+        self.assertFalse(self.gate())
+
+    def test_posix_terminal_skips_the_probe(self) -> None:
+        # Off Windows there is no console switch; a tty understands the codes as-is.
+        self.assertTrue(self.gate(isatty=True, platform="linux"))
+
+    def test_windows_colors_once_the_switch_is_accepted(self) -> None:
+        # A console that takes the bit — classic conhost, Windows Terminal, VS Code.
+        self.assertTrue(self.gate(isatty=True, windll=self.windll()))
+
+    def test_windows_plain_text_when_the_switch_is_refused(self) -> None:
+        # A console without the bit (Windows pre-10) prints the codes literally: off.
+        self.assertFalse(self.gate(isatty=True, windll=self.windll(setmode=0)))
+
+    def test_windows_plain_text_without_a_console(self) -> None:
+        # GetConsoleMode refusing the stdout handle means no console behind it.
+        self.assertFalse(self.gate(isatty=True, windll=self.windll(getmode=0)))
+
+    def test_windows_plain_text_without_kernel32(self) -> None:
+        # windll=None plays the stripped/non-Windows build the probe must survive.
+        self.assertFalse(self.gate(isatty=True, windll=None))
+
+    def test_translating_shells_color_even_when_the_switch_is_refused(self) -> None:
+        # ConEmu and ANSICON rewrite the codes themselves: no switch to flip.
+        for env in ({"ConEmuANSI": "ON"}, {"ANSICON": "1"}):
+            with self.subTest(env=env):
+                self.assertTrue(self.gate(env=env, isatty=True, windll=self.windll(setmode=0)))
+
+    def test_the_requested_bit_is_the_virtual_terminal_one(self) -> None:
+        shell = self.windll()
+        self.gate(isatty=True, windll=shell)
+        api = shell.kernel32
+        api.GetStdHandle.assert_called_once_with(-11)  # STD_OUTPUT_HANDLE
+        # The fake console starts at mode 0, so the request must carry exactly the bit.
+        self.assertEqual(api.SetConsoleMode.call_args[0][1], style.ENABLE_VIRTUAL_TERMINAL_PROCESSING)
 
 
 if __name__ == "__main__":

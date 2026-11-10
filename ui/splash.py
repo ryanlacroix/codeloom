@@ -5,7 +5,8 @@ The art is embedded as a constant (pre-generated, originally saved at
 no matter how or from where the harness is launched. The block is centered
 horizontally in the terminal as a whole (never line-by-line, which would break
 the figure). Nothing is printed when colors are off (NO_COLOR, non-terminal
-output, dumb terminal), keeping that output clean.
+output, dumb terminal, a Windows console that cannot be switched to ANSI), keeping
+that output clean.
 """
 
 import shutil
@@ -21,8 +22,12 @@ ART = r""" ⡎⠑ ⢀⡀ ⢀⣸ ⢀⡀ ⡇  ⢀⡀ ⢀⡀ ⣀⣀  ⡠⡠
 
 def print_splash() -> None:
     """Print a blank line, then the title art centered in the terminal, bold
-    cyan, then another blank line; nothing if colors are off."""
-    if not style.colors_enabled():
+    cyan, then another blank line; nothing if colors are off.
+
+    Gated on style.ENABLED — the one flag every painted string and the console
+    clear read — rather than a fresh colors_enabled() call, so printed and
+    unpainted output can never disagree."""
+    if not style.ENABLED:
         return
     print()
     lines = ART.splitlines()
