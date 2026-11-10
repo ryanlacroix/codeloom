@@ -24,7 +24,7 @@ from api.models import Usage
 # back to "on"'s budget. Anthropic requires a budget of at least 1024 tokens and
 # below max_tokens, so build_request clamps high budgets into that window.
 THINK_BUDGETS = {"low": 2000, "on": 8000, "medium": 8000, "high": 14000}
-DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
+DEFAULT_ANTHROPIC_VERSION = "2026-10-11"
 
 
 def endpoint_url(base_url: str) -> str:
@@ -288,7 +288,7 @@ class AnthropicClient:
         # "headers" is applied last, so it can override any of these (including
         # anthropic-version for a server pinned to a different one).
         self.headers = {
-            "x-api-key": key,
+            #"x-api-key": key,
             "authorization": f"Bearer {key}",
             "anthropic-version": DEFAULT_ANTHROPIC_VERSION,
             "content-type": "application/json",
