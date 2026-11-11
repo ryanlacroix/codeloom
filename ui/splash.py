@@ -13,11 +13,11 @@ import shutil
 
 from ui import style
 
-# "CodeLoom" in the braille-dots figlet style, kept exactly as generated
+# "lloom" in the braille-dots figlet style, kept exactly as generated
 # (leading blank line and trailing whitespace trimmed; see
 # .loom-temp/splash-text.txt).
-ART = r""" ⡎⠑ ⢀⡀ ⢀⣸ ⢀⡀ ⡇  ⢀⡀ ⢀⡀ ⣀⣀  ⡠⡠
- ⠣⠔ ⠣⠜ ⠣⠼ ⠣⠭ ⠧⠤ ⠣⠜ ⠣⠜ ⠇⠇⠇"""
+ART = r""" ⡇ ⡇ ⢀⡀ ⢀⡀ ⣀⣀ 
+ ⠣ ⠣ ⠣⠜ ⠣⠜ ⠇⠇⠇"""
 
 
 def print_splash() -> None:
