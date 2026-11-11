@@ -51,7 +51,11 @@ TOOLS = [
         "(over 100 MB) and symlinked "
         "files are skipped in directory searches, protected paths such as .git are never searched, "
         "and results are capped: when the cap is reached, narrow the pattern or the path. This does "
-        "not count as the read_file needed before editing a file.",
+        "not count as the read_file needed before editing a file. Prefer simple, literal search terms: "
+        "one word or short phrase per call, scoped to a specific file or directory, with a modest max_results. "
+        "Do not use long alternation patterns (e.g. a|b|c), escaped brackets, or heavy regex metacharacters - broad/complex "
+        "patterns can be misflagged by endpoint-security software on Windows (e.g. Defender) and cause the call to fail. "
+        "If you need several terms, issue separate narrow searches instead of one broad one.",
         "strict": True,
         "input_schema": {
             "type": "object",
