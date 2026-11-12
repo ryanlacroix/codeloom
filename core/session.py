@@ -113,6 +113,7 @@ class Session:
     def reset(self) -> None:
         """Clear the conversation and every state flag (/reset)."""
         self.agent.messages = []
+        self.agent.context_input = 0  # no history left for the footer to measure
         self.plan_mode = False
         self.paste_pending = False
         print(style.dim("  [conversation cleared]"))

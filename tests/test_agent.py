@@ -1,10 +1,12 @@
 """Tests for core.agent: the turn loop, the mode notes, tool dispatch, and redaction."""
 
+import io
 import unittest
+from contextlib import redirect_stdout
 from unittest import mock
 
 from api.http_client import APIError
-from api.models import Usage
+from api.models import Usage, format_tokens
 from core.agent import MAX_TOKENS, Agent, cut_off_reason
 from core.prompts import COMPACT_NOTE, COMPACT_SUMMARY_NOTE, SYSTEM_PROMPT
 from core.redact import Redactor
@@ -37,6 +39,26 @@ class CutOffReasonTest(unittest.TestCase):
         self.assertIn("was cut off", cut_off_reason([]))
 
 
+class FormatTokensTest(unittest.TestCase):
+    """The compact "~12.3k" rendering the usage footer reports the context in."""
+
+    def test_exact_below_a_thousand_and_one_decimal_above(self) -> None:
+        cases = {
+            0: "~0",
+            890: "~890",
+            999: "~999",
+            1_000: "~1k",
+            1_250: "~1.3k",
+            12_000: "~12k",
+            12_340: "~12.3k",
+            123_456: "~123.5k",
+            1_234_567: "~1.2m",
+        }
+        for count, text in cases.items():
+            with self.subTest(count=count):
+                self.assertEqual(format_tokens(count), text)
+
+
 class AgentTurnTest(WorkspaceTest):
     def make_agent(self, responses: list, **kwargs) -> Agent:
         return Agent(FakeClient(responses), self.ws, model="test-model", **kwargs)
@@ -58,6 +80,26 @@ class AgentTurnTest(WorkspaceTest):
         self.assertEqual(tool_result["tool_use_id"], "t1")
         self.assertEqual(tool_result["content"], "(empty directory)")
         self.assertEqual(agent.messages[3]["content"][0]["text"], "done")
+
+    def test_the_footer_reports_the_context_not_the_turn_sum(self) -> None:
+        agent = self.make_agent(
+            [
+                {
+                    "content": [{"type": "tool_use", "id": "t1", "name": "list_directory", "input": {"path": "."}}],
+                    "stop_reason": "tool_use",
+                    "usage": Usage(10_000, 50),
+                },
+                {"content": [{"type": "text", "text": "done"}], "stop_reason": "end_turn", "usage": Usage(12_340, 890)},
+            ]
+        )
+        with redirect_stdout(io.StringIO()) as out:
+            agent.send("list the root")
+        # The context is the newest call's prompt — the widest request so far —
+        # not the turn's calls added up (22,340 here). The output count is the
+        # opposite: the whole turn's output (50 + 890), as it always was.
+        self.assertIn("[context ~12.3k, 940 output]", out.getvalue())
+        self.assertNotIn("22,340", out.getvalue())
+        self.assertEqual(agent.context_input, 12_340)
 
     def test_read_only_messages_refuse_write_tools(self) -> None:
         agent = self.make_agent(
@@ -224,9 +266,11 @@ class AgentCompactTest(WorkspaceTest):
             ]
         )
         agent.messages = [dict(m) for m in self.HISTORY]
+        agent.context_input = 123_000  # the pre-compaction size a successful compact must clear
         usage = agent.compact()
         self.assertEqual((usage.input, usage.output), (500, 60))
         self.assertEqual(agent.messages, [{"role": "user", "content": COMPACT_SUMMARY_NOTE + "the summary"}])
+        self.assertEqual(agent.context_input, 0)  # the next turn re-measures the summary-sized history
 
     def test_the_compact_call_is_tool_free_and_carries_the_focus(self) -> None:
         agent = self.make_agent([{"content": [{"type": "text", "text": "s"}], "stop_reason": "end_turn"}])
@@ -265,8 +309,10 @@ class AgentCompactTest(WorkspaceTest):
                 agent = self.make_agent([response])
                 history = [dict(m) for m in self.HISTORY]
                 agent.messages = history
+                agent.context_input = 555  # a failed compact keeps the last measured context
                 self.assertIsNone(agent.compact())
                 self.assertEqual(agent.messages, history)
+                self.assertEqual(agent.context_input, 555)
 
     def test_a_failed_call_leaves_the_history_unchanged(self) -> None:
         agent = self.make_agent([APIError(500, "boom")])

@@ -3,7 +3,7 @@
 from ui import style
 from ui.stream import StreamPrinter
 from api.ollama_client import OllamaClient
-from api.models import Usage
+from api.models import Usage, format_tokens
 from core.prompts import (
     COMPACT_FOCUS,
     COMPACT_NOTE,
@@ -62,6 +62,14 @@ class Agent:
         self.show_thinking = show_thinking
         self.messages = []
         self.session_usage = Usage()
+        # The input-token count the API charged for the newest completed call's
+        # prompt: inside a tool loop every request contains all the earlier
+        # ones', so the last call's input is always the widest — the context
+        # window measure the footer in send() prints. It is a lower bound (the
+        # message typed next is not counted yet), and run_turn refreshes it on
+        # every call. compact() and Session.reset zero it when they replace the
+        # history with something that has not been measured yet.
+        self.context_input = 0
         self.read_only = False
 
     def set_model(self, model: str) -> None:
@@ -74,7 +82,7 @@ class Agent:
         self.model = model
 
     def send(self, user_text: str, read_only: bool = False, plan: str | None = None) -> None:
-        """Run one user turn, then print its token usage.
+        """Run one user turn, then print the context size and the output usage.
 
         With read_only, the model may list and read files but every write is refused.
         plan selects the planning behaviour, where each note is prepended to the user
@@ -84,7 +92,10 @@ class Agent:
           "approved" the user accepted the plan: implement it now (writes allowed)
 
         The summary is printed even if the turn fails part-way, because the
-        API calls that did complete were still sent and counted.
+        API calls that did complete were still sent and counted. The context
+        figure is the newest completed call's prompt tokens (the widest request
+        so far, since each call of a tool loop contains the earlier ones) — a
+        lower bound until the message typed next is counted.
         """
         turn_usage = Usage()
         self.read_only = read_only or plan in ("start", "update")
@@ -109,7 +120,10 @@ class Agent:
             self.read_only = False
             self.session_usage.add(turn_usage)
             if turn_usage.input or turn_usage.output:
-                print("\n" + style.dim(f"  [{turn_usage.input:,} input tokens, {turn_usage.output:,} output]"))
+                print(
+                    "\n"
+                    + style.dim(f"  [context {format_tokens(self.context_input)}, {turn_usage.output:,} output]")
+                )
 
     def last_reply_text(self) -> str:
         """The text of the newest assistant reply, without thinking or tool calls.
@@ -174,6 +188,10 @@ class Agent:
         if self.redactor:
             text = self.redactor.redact(text)
         self.messages = [{"role": "user", "content": COMPACT_SUMMARY_NOTE + text}]
+        # The old measurement described the history that just left; the next
+        # turn's first call re-measures the summary-sized context. A failed
+        # compact keeps both the history and the measurement.
+        self.context_input = 0
         return turn_usage
 
     def compact_body(self, note: str) -> dict:
@@ -209,7 +227,9 @@ class Agent:
             # thinking block from the reply streamed in the same response.
             printer = StreamPrinter(self.model, self.show_thinking)
             response = self.client.create_message(self.request_body(), printer)
-            turn_usage.add(response.get("usage") or Usage())
+            call_usage = response.get("usage") or Usage()
+            turn_usage.add(call_usage)
+            self.context_input = call_usage.input
             content = response.get("content", [])
             stop_reason = response.get("stop_reason")
             # Append the full content (including thinking blocks) unchanged.
