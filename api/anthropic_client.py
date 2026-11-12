@@ -283,12 +283,11 @@ class AnthropicClient:
         self.think = think
         self.url = endpoint_url(config["base_url"])
         key = config["api_key"]
-        # The key goes both ways: the real API takes x-api-key, gateways usually
-        # expect a Bearer token, and neither minds the other header. The config's
-        # "headers" is applied last, so it can override any of these (including
-        # anthropic-version for a server pinned to a different one).
+        # The key goes out as a Bearer token only; x-api-key is not sent. The
+        # config's "headers" is applied last, so it can add or override any of
+        # these (including anthropic-version for a server pinned to a different
+        # one — or x-api-key itself, for an endpoint that wants it).
         self.headers = {
-            #"x-api-key": key,
             "authorization": f"Bearer {key}",
             "anthropic-version": DEFAULT_ANTHROPIC_VERSION,
             "content-type": "application/json",

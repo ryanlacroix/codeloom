@@ -1,4 +1,4 @@
-"""Startup splash: the "CodeLoom" title art shown when the harness starts.
+"""Startup splash: the "loom" title art shown when the harness starts.
 
 The art is embedded as a constant (pre-generated, originally saved at
 .loom-temp/splash-text.txt) rather than read from disk, so the splash works
@@ -13,11 +13,11 @@ import shutil
 
 from ui import style
 
-# "lloom" in the braille-dots figlet style, kept exactly as generated
+# "loom" in the braille-dots figlet style, kept exactly as generated
 # (leading blank line and trailing whitespace trimmed; see
 # .loom-temp/splash-text.txt).
-ART = r""" ⡇ ⡇ ⢀⡀ ⢀⡀ ⣀⣀ 
- ⠣ ⠣ ⠣⠜ ⠣⠜ ⠇⠇⠇"""
+ART = r""" ⡇ ⢀⡀ ⢀⡀ ⣀⣀ 
+ ⠣ ⠣⠜ ⠣⠜ ⠇⠇⠇"""
 
 
 def print_splash() -> None:

@@ -3,7 +3,10 @@
 import unittest
 from unittest import mock
 
+from api.http_client import APIError
+from api.models import Usage
 from core.agent import MAX_TOKENS, Agent, cut_off_reason
+from core.prompts import COMPACT_NOTE, COMPACT_SUMMARY_NOTE, SYSTEM_PROMPT
 from core.redact import Redactor
 from core.tools import TOOLS
 
@@ -15,9 +18,14 @@ class FakeClient:
 
     def __init__(self, responses: list):
         self.responses = list(responses)
+        self.bodies = []  # every request body create_message was given
 
     def create_message(self, body: dict, printer) -> dict:
-        return self.responses.pop(0)
+        self.bodies.append(body)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 class CutOffReasonTest(unittest.TestCase):
@@ -184,6 +192,103 @@ class MalformedToolCallTest(WorkspaceTest):
         self.assertTrue(result["is_error"])
         self.assertIn("Error: boom.", result["content"])
         self.assertEqual(agent.messages[3]["content"][0]["text"], "ok")
+
+
+class AgentCompactTest(WorkspaceTest):
+    """The compaction: one tool-free call summarizes the history, and only a
+    complete summary replaces it — anything less (an empty or cut-off summary,
+    a refusal, a stray tool call, or a failed call) leaves the history exactly
+    as it was."""
+
+    HISTORY = [
+        {"role": "user", "content": "list the root"},
+        {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "t1", "name": "list_directory", "input": {"path": "."}}],
+        },
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "(empty directory)"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+    ]
+
+    def make_agent(self, responses: list, **kwargs) -> Agent:
+        return Agent(FakeClient(responses), self.ws, model="test-model", **kwargs)
+
+    def test_summary_replaces_the_history(self) -> None:
+        agent = self.make_agent(
+            [
+                {
+                    "content": [{"type": "thinking", "thinking": "hm"}, {"type": "text", "text": "the summary"}],
+                    "stop_reason": "end_turn",
+                    "usage": Usage(500, 60),
+                }
+            ]
+        )
+        agent.messages = [dict(m) for m in self.HISTORY]
+        usage = agent.compact()
+        self.assertEqual((usage.input, usage.output), (500, 60))
+        self.assertEqual(agent.messages, [{"role": "user", "content": COMPACT_SUMMARY_NOTE + "the summary"}])
+
+    def test_the_compact_call_is_tool_free_and_carries_the_focus(self) -> None:
+        agent = self.make_agent([{"content": [{"type": "text", "text": "s"}], "stop_reason": "end_turn"}])
+        agent.messages = [dict(m) for m in self.HISTORY]
+        agent.compact("the failing test")
+        body = agent.client.bodies[-1]
+        self.assertEqual(set(body), {"model", "max_tokens", "system", "messages"})
+        self.assertEqual(body["max_tokens"], MAX_TOKENS)
+        self.assertEqual(body["system"], SYSTEM_PROMPT)
+        self.assertEqual(body["messages"][:-1], self.HISTORY)
+        self.assertEqual(body["messages"][-1]["role"], "user")
+        # The note (plus the focus line) is only ever sent, never parked in the
+        # live history.
+        self.assertEqual(
+            body["messages"][-1]["content"], COMPACT_NOTE + "Focus especially on: the failing test\n"
+        )
+
+    def test_an_unusable_summary_leaves_the_history_unchanged(self) -> None:
+        for response, _why in (
+            # only thinking, no text
+            ({"content": [{"type": "thinking", "thinking": "hm"}], "stop_reason": "end_turn"}, "no summary text"),
+            ({"content": [{"type": "text", "text": "no"}], "stop_reason": "refusal"}, "declined to summarize"),
+            ({"content": [{"type": "text", "text": "half a summary"}], "stop_reason": "max_tokens"}, "cut off"),
+            (
+                {
+                    "content": [
+                        {"type": "text", "text": "let me look"},
+                        {"type": "tool_use", "id": "x", "name": "list_directory", "input": {}},
+                    ],
+                    "stop_reason": "tool_use",
+                },
+                "run a tool",
+            ),
+        ):
+            with self.subTest(stop=response["stop_reason"]):
+                agent = self.make_agent([response])
+                history = [dict(m) for m in self.HISTORY]
+                agent.messages = history
+                self.assertIsNone(agent.compact())
+                self.assertEqual(agent.messages, history)
+
+    def test_a_failed_call_leaves_the_history_unchanged(self) -> None:
+        agent = self.make_agent([APIError(500, "boom")])
+        agent.messages = [dict(m) for m in self.HISTORY]
+        with self.assertRaises(APIError):
+            agent.compact()
+        self.assertEqual(agent.messages, self.HISTORY)
+
+    def test_an_empty_conversation_refuses_to_compact(self) -> None:
+        agent = self.make_agent([])
+        with self.assertRaises(ValueError):
+            agent.compact()
+        self.assertEqual(agent.messages, [])
+
+    def test_the_stored_summary_is_redacted(self) -> None:
+        agent = self.make_agent(
+            [{"content": [{"type": "text", "text": "the note held SEKRET"}], "stop_reason": "end_turn"}],
+            redactor=Redactor(["SEKRET"]),
+        )
+        agent.messages = [dict(m) for m in self.HISTORY]
+        agent.compact()
+        self.assertEqual(agent.messages[0]["content"], COMPACT_SUMMARY_NOTE + "the note held <redacted>")
 
 
 if __name__ == "__main__":

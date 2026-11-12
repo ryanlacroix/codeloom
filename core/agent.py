@@ -5,6 +5,9 @@ from ui.stream import StreamPrinter
 from api.ollama_client import OllamaClient
 from api.models import Usage
 from core.prompts import (
+    COMPACT_FOCUS,
+    COMPACT_NOTE,
+    COMPACT_SUMMARY_NOTE,
     PLAN_APPROVED_NOTE,
     PLAN_FEEDBACK_NOTE,
     PLAN_NOTE,
@@ -122,6 +125,70 @@ class Agent:
                     if isinstance(block, dict) and block.get("type") == "text"
                 )
         return ""
+
+    def compact(self, focus: str | None = None) -> Usage | None:
+        """Replace the whole conversation with a summary the model writes (/compact).
+
+        One tool-free API call sends the history with a fixed note after it asking
+        for that summary (plus any focus instructions the user typed), and it
+        streams like an ordinary reply. Only a complete reply with summary text
+        compacts: that text, redacted like everything else joining the
+        conversation, then becomes the new single history message. Otherwise the
+        history stays exactly as it was and this prints why instead (an empty or
+        cut-off summary, a refusal, a stray tool call) — the response shape of a
+        normal turn, so nothing here can strand a half-written compaction.
+
+        Returns the call's Usage for the caller's report, or None when nothing
+        changed. API and connection errors raise for the caller to report, and
+        leave the history untouched too.
+        """
+        if not self.messages:
+            raise ValueError("nothing to compact")
+        note = COMPACT_NOTE
+        if focus:
+            note += COMPACT_FOCUS.format(focus=focus) + "\n"
+        printer = StreamPrinter(self.model, self.show_thinking)
+        response = self.client.create_message(self.compact_body(note), printer)
+        turn_usage = Usage()
+        turn_usage.add(response.get("usage") or Usage())
+        # The call completed, so it counts even when its summary is unusable.
+        self.session_usage.add(turn_usage)
+        content = response.get("content", [])
+        stop_reason = response.get("stop_reason")
+        text = "".join(
+            block["text"] for block in content if isinstance(block, dict) and block.get("type") == "text"
+        ).strip()
+        reason = None
+        if stop_reason == "refusal":
+            reason = "the model declined to summarize"
+        elif stop_reason == "max_tokens":
+            reason = "the summary was cut off by the output limit"
+        elif stop_reason == "tool_use":
+            reason = "the reply asked to run a tool instead of summarizing"
+        elif not text:
+            reason = "the reply held no summary text"
+        if reason:
+            print("\n" + style.warning(f"  [{reason}; the conversation is unchanged]"))
+            print(style.dim(f"  [{turn_usage.input:,} input tokens, {turn_usage.output:,} output]"))
+            return None
+        if self.redactor:
+            text = self.redactor.redact(text)
+        self.messages = [{"role": "user", "content": COMPACT_SUMMARY_NOTE + text}]
+        return turn_usage
+
+    def compact_body(self, note: str) -> dict:
+        """The body of the one-off compact call: like request_body(), minus the
+        tools — the reply must be summary prose, and a call that cannot name a
+        tool cannot run one. The model, the output limit and the system prompt
+        are unchanged; the messages are a copy of the history plus the summary
+        request as the last user message, so a failed compact never leaves the
+        note stranded in the live history."""
+        return {
+            "model": self.model,
+            "max_tokens": MAX_TOKENS,
+            "system": SYSTEM_PROMPT,
+            "messages": self.messages + [{"role": "user", "content": note}],
+        }
 
     def request_body(self) -> dict:
         """The body sent to the client: the model, the output limit, the system

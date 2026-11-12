@@ -377,6 +377,37 @@ def cmd_continue(session, args, line):
     return submit
 
 
+@command("/compact", usage="/compact [instructions]")
+def cmd_compact(session, args, line):
+    """replace the conversation history with a summary the model writes"""
+    # One tool-free API call asks for the whole history's summary (plus any
+    # focus instructions typed after the word); only a completed summary becomes
+    # the new history, so a failed or unusable one changes nothing. A pending
+    # paste stays pending, and plan mode keeps its state: the summary carries
+    # the plan discussion forward. agent.compact raises API/connection errors
+    # for the caller to report, because the loop's own except only wraps
+    # agent.send.
+    if not session.agent.messages:
+        print(style.dim("  [nothing to compact]"))
+        return
+    count = len(session.agent.messages)
+    print(style.dim("  [compacting: the model summarizes the conversation below]"))
+    try:
+        usage = session.agent.compact(line[len("/compact") :].strip() or None)
+    except APIError as e:
+        report_api_error(e, args)
+        return
+    except APIConnectionError as e:
+        print(style.error(f"  [could not reach the API: {e}]"))
+        return
+    except KeyboardInterrupt:
+        print("\n" + style.warning("  [interrupted]"))
+        return
+    if usage is None:
+        return  # agent.compact already said why the conversation is unchanged
+    print("\n" + style.dim(f"  [{count} messages became the summary above; {usage.input:,} input tokens, {usage.output:,} output]"))
+
+
 @command("/reset")
 def cmd_reset(session, args, line):
     """clear the conversation and start over"""
@@ -401,6 +432,25 @@ def plain_submit(session, args, line) -> Submit:
     if session.plan_mode:
         return session.as_plan_update(submit)
     return submit
+
+
+def report_api_error(e: APIError, args) -> None:
+    """The shared wording for a failed API call, in the turn loop and /compact.
+
+    Both endpoints hold their key in their config file, so a 401 says which one
+    to check; 429 gets its own retry advice; anything else prints the endpoint's
+    message, with the thinking hint when thinking was on and the failure looks
+    like a model that lacks it.
+    """
+    if e.status == 401:
+        source = args.api_config if args.api_config else OLLAMA_CONFIG_FILE
+        print(style.error(f"  [authentication failed: check the API key in {source}]"))
+    elif e.status == 429:
+        print(style.warning("  [rate limited: wait a moment and try again]"))
+    else:
+        print(style.error(f"  [API error {e.status}: {e.message}]"))
+        if args.think and "think" in e.message.lower():
+            print(style.warning("  [this model may not support thinking: try again with --think off]"))
 
 
 def main() -> None:
@@ -651,16 +701,7 @@ def main() -> None:
             print("\n" + style.warning("  [interrupted]"))
             del agent.messages[history_len:]
         except APIError as e:
-            if e.status == 401:
-                # Both endpoints hold their key in their config file; say which one to check.
-                source = args.api_config if args.api_config else OLLAMA_CONFIG_FILE
-                print(style.error(f"  [authentication failed: check the API key in {source}]"))
-            elif e.status == 429:
-                print(style.warning("  [rate limited: wait a moment and try again]"))
-            else:
-                print(style.error(f"  [API error {e.status}: {e.message}]"))
-                if args.think and "think" in e.message.lower():
-                    print(style.warning("  [this model may not support thinking: try again with --think off]"))
+            report_api_error(e, args)
             del agent.messages[history_len:]
         except APIConnectionError as e:
             print(style.error(f"  [could not reach the API: {e}]"))

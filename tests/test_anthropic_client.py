@@ -359,12 +359,12 @@ class AnthropicClientTest(unittest.TestCase):
             "messages": messages,
         }
 
-    def test_headers_carry_the_key_both_ways_and_the_version(self) -> None:
+    def test_headers_carry_the_key_as_a_bearer_token_and_the_version(self) -> None:
         client = self.make()
         self.assertEqual(client.url, "https://llm.internal.example.com/v1/messages")
-        self.assertEqual(client.headers["x-api-key"], "secret")
         self.assertEqual(client.headers["authorization"], "Bearer secret")
-        self.assertEqual(client.headers["anthropic-version"], "2023-06-01")
+        self.assertNotIn("x-api-key", client.headers)  # Bearer only, unless config headers add it
+        self.assertEqual(client.headers["anthropic-version"], "2026-10-11")
         self.assertEqual(client.headers["content-type"], "application/json")
 
     def test_config_headers_override_the_defaults(self) -> None:
@@ -447,7 +447,7 @@ class CreateMessageTest(unittest.TestCase):
     def test_parses_the_sse_stream_and_closes_the_printer(self) -> None:
         result, printer, captured = self.run_stream(sse_lines(TOOL_TURN))
         self.assertEqual(captured["url"], "https://x/v1/messages")
-        self.assertEqual(captured["headers"]["x-api-key"], "k")
+        self.assertEqual(captured["headers"]["authorization"], "Bearer k")
         self.assertTrue(captured["request"]["stream"])
         self.assertEqual(result["stop_reason"], "tool_use")
         self.assertEqual(result["content"][2]["input"], {"pattern": "it"})

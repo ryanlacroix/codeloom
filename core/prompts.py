@@ -2,10 +2,11 @@
 
 The system prompt names the tools and the sandbox rules; the four mode notes
 are prepended to a user message to set how it must be answered (read-only,
-plan request, plan update, plan approved); and the continue nudge is the fixed
-text the /continue command sends. Keeping the wording here, rather than
-scattered through the loop, puts prompt work in one editable place and keeps
-it out of the code.
+plan request, plan update, plan approved); the continue nudge is the fixed
+text the /continue command sends; and the compact texts ask for the summary
+of the conversation (/compact) and frame it once it replaces the history.
+Keeping the wording here, rather than scattered through the loop, puts prompt
+work in one editable place and keeps it out of the code.
 """
 
 # One prompt, sectioned in Markdown, the format Ollama Cloud's models follow
@@ -117,3 +118,28 @@ PLAN_APPROVED_NOTE = (
 # when the cut-off tool call meant the reply left no trace in the history at
 # all.
 CONTINUE_MESSAGE = "Your last response was cut off by the output limit before it was finished. Continue your work, picking up where you left off."
+
+# The fixed note /compact appends after the full history, asking for the summary
+# that will replace it. The compact call itself carries no tool definitions
+# (agent.py's compact_body omits them), so the reply is summary prose and the
+# call can neither read nor change anything.
+COMPACT_NOTE = (
+    "[Compact request: the conversation above is about to be reduced to your reply. Write a concise "
+    "summary that keeps everything needed to continue seamlessly: the task and its current state, "
+    "the decisions made, which files were created or changed (with their paths), the key findings "
+    "from the tools, anything the user must run themselves, and the next steps. Reply with the "
+    "summary text only — no preamble.]\n\n"
+)
+
+# The focus line appended to COMPACT_NOTE when the user typed instructions after
+# the /compact word, e.g. "/compact the failing test".
+COMPACT_FOCUS = "Focus especially on: {focus}"
+
+# Prepended to the stored summary when it becomes the new history's only message.
+# This frames the summary as context rather than letting the model mistake it
+# for the live conversation when the user's next real message arrives.
+COMPACT_SUMMARY_NOTE = (
+    "[Compacted: the earlier conversation was replaced by this summary of it, written by you. "
+    "Treat it as your context for continuing the work, and reply to the user's next message as "
+    "usual.]\n\n"
+)

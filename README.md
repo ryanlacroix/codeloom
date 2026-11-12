@@ -1,4 +1,4 @@
-# CodeLoom
+# loom
 
 A minimal, locked-down agentic coding harness for Ollama Cloud models — or any
 Anthropic-compatible `/v1/messages` endpoint via `--api-config` — written with only
@@ -8,8 +8,9 @@ The model gets six file tools (list_directory, read_file, search, write_file,
 edit_file, append_file), all confined to one workspace directory — and nothing
 else: no shell, no execution, no network. Every write shows the user a diff and
 asks first. Slash commands add a read-only side question (`/talk`), a
-plan-then-approve flow (`/plan` → `/ok`), model switching (`/model`), pasting
-via your editor (`/paste`), and thinking toggles.
+plan-then-approve flow (`/plan` → `/ok`), model switching (`/model`),
+conversation compaction (`/compact`), pasting via your editor (`/paste`), and
+thinking toggles.
 
 ## Quick start
 
@@ -52,7 +53,8 @@ this repo itself is the workspace.
 `base_url` and `api_key` are required (`/v1/messages` is appended to the base);
 `model` is the default model (the first `models` entry if absent), `models` is
 the list `/model` offers, and `headers` adds or overrides request headers. The
-key is sent as both `x-api-key` and a Bearer token. Only `--api-config FILE`
+key is sent as a Bearer token; an endpoint that wants it in `x-api-key`
+too can add that header under `headers`. Only `--api-config FILE`
 selects this endpoint — the file's presence alone does nothing. `FILE` points
 at a file kept elsewhere, and `--redact-file` overrides the redaction list's
 path the same way. Plans are saved to `.loom-temp/plan.md`; the /paste buffer is
@@ -63,7 +65,8 @@ path the same way. Plans are saved to `.loom-temp/plan.md`; the /paste buffer is
     loom.py            the entry point and composition root: argparse, key and
                        redaction config, the command registry, the prompt loop
     core/
-      agent.py         the conversation loop: request body, tool dispatch, usage
+      agent.py         the conversation loop: request body, tool dispatch, usage,
+                       and compaction
       prompts.py       every fixed text sent to the model (system prompt, notes)
       session.py       the loop's state: plan mode, pending paste, plan saving
       tools.py         the tool schemas and the dispatch allowlist
