@@ -25,18 +25,16 @@ class Usage:
 
 
 def format_tokens(count: int) -> str:
-    """Render a token count the way the usage footer reports the context: "~12.3k".
+    """Render a token count the way the usage footers report them: "12.3k".
 
-    Counts under 1,000 stay exact ("~890"); larger ones get one decimal place
-    with a trailing ".0" trimmed ("12,000" -> "~12k"), scaled up to "m" from a
-    million. The "~" marks it as an approximation: agent.send() reports the
-    newest completed call's prompt, and the message typed next is not counted
-    yet.
+    Counts under 1,000 stay exact ("890"); larger ones get one decimal place
+    with a trailing ".0" trimmed ("12,000" -> "12k"), scaled up to "m" from a
+    million.
     """
     for scale, unit in ((1_000_000, "m"), (1_000, "k")):
         if count >= scale:
             tenths = (count * 10 + scale // 2) // scale  # round half up to one decimal
             whole, tenth = divmod(tenths, 10)
             text = str(whole) if tenth == 0 else f"{whole}.{tenth}"
-            return f"~{text}{unit}"
-    return f"~{count}"
+            return f"{text}{unit}"
+    return str(count)

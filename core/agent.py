@@ -122,7 +122,7 @@ class Agent:
             if turn_usage.input or turn_usage.output:
                 print(
                     "\n"
-                    + style.dim(f"  [context {format_tokens(self.context_input)}, {turn_usage.output:,} output]")
+                    + style.dim(f"  [context {format_tokens(self.context_input)}, {format_tokens(turn_usage.output)} output]")
                 )
 
     def last_reply_text(self) -> str:
@@ -183,7 +183,7 @@ class Agent:
             reason = "the reply held no summary text"
         if reason:
             print("\n" + style.warning(f"  [{reason}; the conversation is unchanged]"))
-            print(style.dim(f"  [{turn_usage.input:,} input tokens, {turn_usage.output:,} output]"))
+            print(style.dim(f"  [{format_tokens(turn_usage.input)} input tokens, {format_tokens(turn_usage.output)} output]"))
             return None
         if self.redactor:
             text = self.redactor.redact(text)

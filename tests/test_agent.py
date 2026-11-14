@@ -40,19 +40,19 @@ class CutOffReasonTest(unittest.TestCase):
 
 
 class FormatTokensTest(unittest.TestCase):
-    """The compact "~12.3k" rendering the usage footer reports the context in."""
+    """The scaled "12.3k" rendering the usage footers report token counts in."""
 
     def test_exact_below_a_thousand_and_one_decimal_above(self) -> None:
         cases = {
-            0: "~0",
-            890: "~890",
-            999: "~999",
-            1_000: "~1k",
-            1_250: "~1.3k",
-            12_000: "~12k",
-            12_340: "~12.3k",
-            123_456: "~123.5k",
-            1_234_567: "~1.2m",
+            0: "0",
+            890: "890",
+            999: "999",
+            1_000: "1k",
+            1_250: "1.3k",
+            12_000: "12k",
+            12_340: "12.3k",
+            123_456: "123.5k",
+            1_234_567: "1.2m",
         }
         for count, text in cases.items():
             with self.subTest(count=count):
@@ -97,9 +97,28 @@ class AgentTurnTest(WorkspaceTest):
         # The context is the newest call's prompt — the widest request so far —
         # not the turn's calls added up (22,340 here). The output count is the
         # opposite: the whole turn's output (50 + 890), as it always was.
-        self.assertIn("[context ~12.3k, 940 output]", out.getvalue())
+        self.assertIn("[context 12.3k, 940 output]", out.getvalue())
         self.assertNotIn("22,340", out.getvalue())
         self.assertEqual(agent.context_input, 12_340)
+
+    def test_counts_of_a_thousand_and_up_render_the_k_form(self) -> None:
+        agent = self.make_agent(
+            [
+                {
+                    "content": [{"type": "tool_use", "id": "t1", "name": "list_directory", "input": {"path": "."}}],
+                    "stop_reason": "tool_use",
+                    "usage": Usage(10_000, 350),
+                },
+                {"content": [{"type": "text", "text": "done"}], "stop_reason": "end_turn", "usage": Usage(12_340, 890)},
+            ]
+        )
+        with redirect_stdout(io.StringIO()) as out:
+            agent.send("list the root")
+        # Once a count passes 1,000 the footer scales it (turn output 350 + 890)
+        # and shows neither the comma form nor an approximation mark.
+        self.assertIn("[context 12.3k, 1.2k output]", out.getvalue())
+        self.assertNotIn("1,240", out.getvalue())
+        self.assertNotIn("~", out.getvalue())
 
     def test_read_only_messages_refuse_write_tools(self) -> None:
         agent = self.make_agent(
@@ -313,6 +332,22 @@ class AgentCompactTest(WorkspaceTest):
                 self.assertIsNone(agent.compact())
                 self.assertEqual(agent.messages, history)
                 self.assertEqual(agent.context_input, 555)
+
+    def test_the_failure_footer_reports_both_counts_scaled(self) -> None:
+        agent = self.make_agent(
+            [
+                {
+                    "content": [{"type": "text", "text": "half a summary"}],
+                    "stop_reason": "max_tokens",
+                    "usage": Usage(3_412, 890),
+                }
+            ]
+        )
+        agent.messages = [dict(m) for m in self.HISTORY]
+        with redirect_stdout(io.StringIO()) as out:
+            self.assertIsNone(agent.compact())
+        self.assertIn("[3.4k input tokens, 890 output]", out.getvalue())
+        self.assertNotIn("~", out.getvalue())
 
     def test_a_failed_call_leaves_the_history_unchanged(self) -> None:
         agent = self.make_agent([APIError(500, "boom")])

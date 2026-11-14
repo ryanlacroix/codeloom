@@ -54,7 +54,7 @@ from core.prompts import CONTINUE_MESSAGE
 from core.session import PASTE_FILE, TEMP_DIR, Session, Submit
 from api.anthropic_client import AnthropicClient, load_endpoint_config
 from api.http_client import APIConnectionError, APIError
-from api.models import OLLAMA_DEFAULT_MODEL, OLLAMA_MODELS
+from api.models import OLLAMA_DEFAULT_MODEL, OLLAMA_MODELS, format_tokens
 from api.ollama_client import OllamaClient, load_ollama_config
 from core.redact import Redactor, load_redactions
 from core.workspace import EXEC_RISK_NAMES, Workspace
@@ -212,10 +212,13 @@ def make_approver(auto_approve: bool):
         # Like every prompt the user types at, the question is preceded by a blank line.
         print()
         try:
-            answer = input(style.prompt("  Allow this write? [y/N] ", style.BOLD)).strip().lower()
+            answer = input(style.prompt("  Allow this write? [Y/n] ", style.BOLD)).strip().lower()
         except EOFError:
             return False
-        return answer in ("y", "yes")
+        # Enter alone is the default yes. Only an explicit no (or any
+        # unrecognised text) declines, and a dead stdin (EOF) also declines
+        # rather than start approving a model's writes.
+        return answer in ("y", "yes", "")
 
     return approve
 
@@ -405,7 +408,7 @@ def cmd_compact(session, args, line):
         return
     if usage is None:
         return  # agent.compact already said why the conversation is unchanged
-    print("\n" + style.dim(f"  [{count} messages became the summary above; {usage.input:,} input tokens, {usage.output:,} output]"))
+    print("\n" + style.dim(f"  [{count} messages became the summary above; {format_tokens(usage.input)} input tokens, {format_tokens(usage.output)} output]"))
 
 
 @command("/reset")
